@@ -1,4 +1,4 @@
-export { type World, type Json, isPlainData, assertPlainData, NonPlainDataError } from "./world.js";
+export { type World, type Json, isPlainData, assertPlainData, makeWorld, NonPlainDataError } from "./world.js";
 export { computeFingerprint } from "./fingerprint.js";
 export type { Delta } from "./delta.js";
 export { type ProjectedEffect, type AssumptionKind } from "./projected-effect.js";

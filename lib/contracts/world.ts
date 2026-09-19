@@ -1,3 +1,5 @@
+import { computeFingerprint } from "./fingerprint.js";
+
 /**
  * `World<TState>` — a typed, addressable, versioned, hashed snapshot of
  * exactly the state slice an action touches. Everything downstream (a
@@ -122,4 +124,48 @@ export function assertPlainData(value: unknown, context: string): void {
   if (!isPlainData(value)) {
     throw new NonPlainDataError(context);
   }
+}
+
+/**
+ * The one blessed `World` constructor referenced throughout this file's
+ * header and `assertPlainData`'s own doc comment. Two things make a
+ * `World` built here strictly safer than a hand-assembled object literal
+ * satisfying the `World<TState>` interface:
+ *
+ *   1. It calls `assertPlainData` on `data` before anything else, so the
+ *      runtime gate the file header argues for is actually load-bearing
+ *      for values built through this function, not merely exported and
+ *      exercised only in `__tests__/`.
+ *   2. It computes `fingerprint` itself, via `computeFingerprint`
+ *      (fingerprint.ts) — there is no `fingerprint` parameter to pass in
+ *      the first place (see `__tests__/world.test.ts`'s
+ *      `@ts-expect-error` proof). A caller supplying a stale or wrong
+ *      fingerprint is a defect class this constructor makes structurally
+ *      impossible, rather than a mistake `assertPlainData` or anything
+ *      else would have to catch after the fact.
+ *
+ * A `World` value can still be assembled by hand outside this function —
+ * TypeScript's structural typing cannot forbid that, the same gap the
+ * file header describes for `data` itself — but every call site that
+ * goes through `makeWorld` gets both guarantees for free. `__tests__/`
+ * builds `World` literals directly on purpose, to exercise the type-level
+ * and runtime guards in isolation; that is not a call site this function
+ * needs to replace.
+ */
+export function makeWorld<TState extends Json>(input: {
+  readonly id: string;
+  readonly domain: string;
+  readonly version: number;
+  readonly at: string;
+  readonly data: TState;
+}): World<TState> {
+  assertPlainData(input.data, `makeWorld(id="${input.id}")`);
+  return {
+    id: input.id,
+    domain: input.domain,
+    version: input.version,
+    at: input.at,
+    data: input.data,
+    fingerprint: computeFingerprint(input.data),
+  };
 }

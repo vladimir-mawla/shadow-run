@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertPlainData, isPlainData, NonPlainDataError, type Json, type World } from "../world.js";
+import { assertPlainData, isPlainData, makeWorld, NonPlainDataError, type Json, type World } from "../world.js";
 import { computeFingerprint } from "../fingerprint.js";
 
 /**
@@ -81,5 +81,47 @@ describe("World.data is plain, serializable data", () => {
     const data: Json = { reserved: 3, tags: ["a", "b"], meta: { ok: true, note: null } };
     const roundTripped = JSON.parse(JSON.stringify(data));
     expect(roundTripped).toEqual(data);
+  });
+});
+
+describe("makeWorld — the one blessed World constructor", () => {
+  it("constructs a valid World and computes fingerprint from data itself", () => {
+    const world = makeWorld({
+      id: "sku-42",
+      domain: "inventory",
+      version: 1,
+      at: "2026-09-20T00:00:00.000Z",
+      data: { reserved: 3, note: null as string | null },
+    });
+    expect(world.fingerprint).toBe(computeFingerprint({ reserved: 3, note: null }));
+    expect(world.id).toBe("sku-42");
+    expect(world.data.reserved).toBe(3);
+  });
+
+  it("TYPE-LEVEL: makeWorld's input has no fingerprint field — a caller cannot supply a stale or wrong one", () => {
+    const world = makeWorld({
+      id: "x",
+      domain: "d",
+      version: 1,
+      at: "2026-09-20T00:00:00.000Z",
+      data: { a: 1 },
+      // @ts-expect-error — fingerprint is not part of makeWorld's input; it is always computed, never accepted from a caller.
+      fingerprint: "deadbeef",
+    });
+    expect(world).toBeDefined();
+  });
+
+  it("TYPE-LEVEL + RUNTIME: data with a function does not compile, and the runtime guard also rejects it — the same Json constraint World<TState> itself enforces, doubly", () => {
+    expect(() => {
+      // @ts-expect-error — TState is inferred from `data` and must extend Json; a function-typed field is not assignable to Json, so `makeWorld`'s own type parameter cannot be inferred here.
+      makeWorld({ id: "x", domain: "d", version: 1, at: "2026-09-20T00:00:00.000Z", data: { onCancel: () => {} } });
+    }).toThrow(NonPlainDataError);
+  });
+
+  it("RUNTIME: makeWorld throws NonPlainDataError for data that defeats the type system via a cast — the guard is load-bearing here, not merely exported", () => {
+    const smuggled = { onCancel: () => {} } as unknown as Json;
+    expect(() =>
+      makeWorld({ id: "x", domain: "d", version: 1, at: "2026-09-20T00:00:00.000Z", data: smuggled }),
+    ).toThrow(NonPlainDataError);
   });
 });
