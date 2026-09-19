@@ -26,4 +26,14 @@
   `tsc`, not assumed. Recorded in ADR 0001, Decision 3.
 - not done: `lib/contracts/**` is frozen as of this commit sequence per its own freeze boundary, but M1 is
   NOT marked `done` in `DONE.html` — that happens only after independent (L4) verification, per this
-  account's standing rule. The PR is open, not merged.
+  account's standing rule. Independent (L4) verification has since run and approved the milestone's content,
+  but held it at not-done pending fixes to findings raised during that review (see the `m1-fixes` branch/PR
+  and its commits for what changed and why); M1 is marked `done` only once those fixes land and are folded
+  back into this checkpoint.
+- PR history, corrected: the PR opened for M1 (`m1-contracts-final`, #1) is CLOSED, not open — it was an
+  artifact of a repo-setup error (`gh repo create --source=.` pushed M1's commits directly to `main` before
+  a feature-branch flow existed), and its own closing comment on GitHub explains why merging it would have
+  achieved nothing (`main` already carried the identical content). `main` is the default branch and carries
+  M1's real history directly; there is no open PR for M1 itself. (The stale "the PR is open, not merged"
+  line this replaces was accurate the day it was written and became wrong the moment #1 was closed — a
+  checkpoint that names which PR, and its current state, doesn't have that failure mode.)
