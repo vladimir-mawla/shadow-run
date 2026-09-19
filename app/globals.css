@@ -1,0 +1,18 @@
+/*
+ * Minimal reset — infrastructure only. This project's UI (M8) is not built
+ * yet; this file exists so the App Router has a stylesheet to import and
+ * `npm run typecheck` / `npm run build` have a real app/ tree to check,
+ * ahead of M2 adding app/api/health/**.
+ */
+* {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+}

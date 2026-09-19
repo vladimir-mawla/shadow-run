@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+
+# Next.js generates this triple-slash-reference file itself on every
+# `next dev`/`next build`; it's local wiring, not project content.
+next-env.d.ts
+
+# Environment — .env.example IS committed, it is a required deliverable
+.env
+.env.local
+.env*.local
+!.env.example
+
+# Secrets. Nothing here is expected in this project — shadow-run's
+# simulation and reconciliation logic is deterministic and needs no API
+# keys to run — but an .env.example inviting people to add real values
+# makes a leak one careless `git add -A` away.
+secrets/
+*.pem
+*.key
+
+# Next.js auto-generates these on every build; they are advisory agent notes,
+# not project content.
+AGENTS.md
+CLAUDE.md
+
+# Editors and OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Deploy
+.vercel
+
+# Test output
+coverage/
+
+# A later milestone's demo build (mirrors decision-engine's `.demo-build/`)
+# will compile lib/+scripts/ here so it can run under plain `node`; ignored
+# from the start since it is always regenerated, never committed.
+.demo-build/
