@@ -1,0 +1,99 @@
+# WHY THIS WORKFLOW EXISTS
+# ─────────────────────────────────────────────────────────────────────────
+# The plan's M9 requires this project run from a clean clone with zero
+# credentials configured. Until this workflow exists, that claim is only
+# verified locally, on one machine, with whatever node_modules/cache state
+# happens to already be sitting there. Its value is NOT "the tests pass"
+# (they already passed locally) — it is proving the clean-clone claim on a
+# machine none of us controls: a fresh checkout, a fresh `npm ci`, no
+# leftover state, no assumptions about what's already installed.
+#
+# Copied as infrastructure from decision-engine (this project's sibling)
+# per this project's own house rule: the workflow's shape — assert-no-
+# secrets, pinned Node, npm-ci-only, verify the rolldown native binding,
+# typecheck, test, build — is shared tooling, not conceptual code.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    name: Typecheck, test, and build from a clean clone
+    runs-on: ubuntu-latest
+    # This job deliberately never references a repository secret. lib/
+    # (the contracts, and every later milestone's engine) is deterministic
+    # and reads no external service — see .env.example — and that "needs
+    # no credentials" claim is asserted mechanically below, not just left
+    # as this comment.
+    permissions:
+      contents: read
+    steps:
+      - name: Check out a fresh clone
+        uses: actions/checkout@v4
+
+      - name: Assert this workflow needs zero secrets
+        # A mechanical check, not just a claim in a comment: scans this
+        # workflow file's own non-comment lines for a reference to the
+        # GitHub Actions secrets context, and fails the run if a future
+        # edit adds one — so "this project needs no credentials" can't
+        # silently go stale. The search term is built by concatenation so
+        # this very check does not trip over its own source line.
+        run: |
+          needle="secrets""."
+          hits=$(grep -vE '^[[:space:]]*#' .github/workflows/ci.yml | grep -F "$needle" || true)
+          if [ -n "$hits" ]; then
+            echo "::error::This workflow is documented as needing zero secrets, but a step references the GitHub secrets context:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "Confirmed: no step in this workflow reads a repository secret."
+
+      - name: Set up Node (pinned to match engines.node in package.json)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install dependencies (npm ci only — never npm install)
+        # npm ci, not npm install: an incoherent lockfile must fail the
+        # build here, on a clean checkout, rather than being silently
+        # rewritten. This is also the exact command whose interaction with
+        # npm 11.5.1 is documented (see the next step) to have dropped a
+        # platform-specific optional dependency against an existing
+        # lockfile on the sibling project.
+        run: npm ci
+
+      - name: Verify vitest's platform native binding survived npm ci
+        # vitest (via vite) resolves a platform-specific native binding
+        # from the "rolldown" package's optional dependencies
+        # (@rolldown/binding-<platform>). npm 11.5.1 has a known bug where
+        # npm ci/npm install can drop an optional dependency
+        # (https://github.com/npm/cli/issues/4828) — confirmed on the
+        # decision-engine sibling repo, where it fires with a bare "Cannot
+        # find native binding" that gives no hint the *install*, not the
+        # code, is at fault. Failing here instead, right after npm ci and
+        # before typecheck or test even start, turns that confusing
+        # failure into an immediate, clearly labelled one.
+        run: |
+          node -e "
+            try {
+              require('rolldown');
+              console.log('rolldown native binding loaded OK for this platform.');
+            } catch (e) {
+              console.error('::error::vitest (via vite/rolldown) native binding did not survive npm ci -- ' + e.message);
+              process.exit(1);
+            }
+          "
+
+      - name: Typecheck (both tsconfigs — lib/ and app/)
+        # npm run typecheck already runs both configs in sequence
+        # (tsconfig.lib.json then tsconfig.json).
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
