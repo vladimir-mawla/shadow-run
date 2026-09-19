@@ -82,6 +82,68 @@ describe("World.data is plain, serializable data", () => {
     const roundTripped = JSON.parse(JSON.stringify(data));
     expect(roundTripped).toEqual(data);
   });
+
+  /**
+   * L4 verification finding: TypeScript types an object-literal getter by
+   * its RETURN type, so a getter satisfies `Json` with NO cast at all —
+   * wider than the "deliberate `x as Json` cast" gap the file header
+   * originally named. A value whose reads are not guaranteed to agree
+   * breaks this project's "same input, same fingerprint, always" premise
+   * even though it is not a function. See world.ts's file header, point 2.
+   */
+  it("RUNTIME: isPlainData rejects an object with an accessor property (a getter) — no cast needed to defeat the type system", () => {
+    let n = 0;
+    const obj = {
+      get x() {
+        n++;
+        return n;
+      },
+    };
+    const asJson: Json = obj; // compiles with zero type errors — no `as` anywhere.
+    expect(isPlainData(asJson)).toBe(false);
+    expect(n).toBe(0); // rejected via the property descriptor, never by actually invoking the getter.
+  });
+
+  it("RUNTIME: isPlainData rejects a getter nested inside an otherwise-plain object", () => {
+    const nested: Json = { a: 1, b: { get c(): number { return 2; } } as unknown as Json };
+    expect(isPlainData(nested)).toBe(false);
+  });
+
+  it("RUNTIME: isPlainData rejects an accessor property at an array index", () => {
+    const arr: unknown[] = [1, 2, 3];
+    Object.defineProperty(arr, 1, { get: () => 99, enumerable: true, configurable: true });
+    expect(isPlainData(arr as unknown as Json)).toBe(false);
+  });
+
+  /**
+   * KNOWN LIMITATION, documented rather than fixed (see world.ts's file
+   * header, "KNOWN, UNCLOSED GAP"). A `Proxy` controls the answer to every
+   * reflection call `isPlainData` makes (`ownKeys`,
+   * `getOwnPropertyDescriptor`, `getPrototypeOf`, `get`), so it can present
+   * a fabricated, entirely-innocent view of itself while a real
+   * function-valued property remains reachable by name. This is not a bug
+   * in `isPlainData` to fix — it is a real, stated boundary of what a
+   * reflection-based runtime walk can ever prove. Do not weaken this test
+   * or its comment: the walk is fooled here, on purpose, to prove the gap
+   * is real rather than hypothetical.
+   */
+  it("KNOWN LIMITATION: a Proxy can hide a function-valued property from isPlainData's reflection-based walk entirely", () => {
+    const target = { a: 1, run: () => "still runs" };
+    const proxy = new Proxy(target, {
+      ownKeys() {
+        return ["a"]; // hides "run" from every reflection API isPlainData calls.
+      },
+      getOwnPropertyDescriptor(t, prop) {
+        if (prop === "a") return { value: t.a, enumerable: true, configurable: true, writable: true };
+        return undefined; // legal: "run" is configurable on `target`, so a trap may report it absent.
+      },
+    });
+
+    // isPlainData is fooled: it only ever sees key "a", an ordinary number.
+    expect(isPlainData(proxy as unknown as Json)).toBe(true);
+    // Yet the function is really there, reachable by anyone who accesses it directly.
+    expect(typeof (proxy as unknown as { run: () => string }).run).toBe("function");
+  });
 });
 
 describe("makeWorld — the one blessed World constructor", () => {
@@ -122,6 +184,14 @@ describe("makeWorld — the one blessed World constructor", () => {
     const smuggled = { onCancel: () => {} } as unknown as Json;
     expect(() =>
       makeWorld({ id: "x", domain: "d", version: 1, at: "2026-09-20T00:00:00.000Z", data: smuggled }),
+    ).toThrow(NonPlainDataError);
+  });
+
+  it("RUNTIME: makeWorld throws NonPlainDataError for a getter-bearing value, with no cast at all", () => {
+    const withGetter = { get x() { return 1; } };
+    const asJson: Json = withGetter;
+    expect(() =>
+      makeWorld({ id: "x", domain: "d", version: 1, at: "2026-09-20T00:00:00.000Z", data: asJson }),
     ).toThrow(NonPlainDataError);
   });
 });

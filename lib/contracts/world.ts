@@ -22,15 +22,41 @@ import { computeFingerprint } from "./fingerprint.js";
  *      the honest mistake — nobody writing `world.data = { onCancel: () =>
  *      {} }` gets past `tsc`.
  *   2. Runtime: `isPlainData` (below) walks an actual value and rejects
- *      functions, symbols, and non-plain-object prototypes structurally,
- *      because TypeScript's structural typing cannot stop a deliberate
- *      cast (`x as Json`) any more than it can for a branded type — see
- *      decision-engine's own `__tests__/brand-casts.test.ts` for the exact
- *      precedent this project follows for that gap. `assertPlainData`
- *      calls this at every construction boundary this milestone controls
- *      (`makeWorld` below) so the guarantee holds for values built through
- *      the one blessed constructor, not merely for values a careful author
- *      happened to type correctly.
+ *      functions, symbols, non-plain-object prototypes, and accessor
+ *      properties (a `get`/`set` pair) structurally. The gap this closes is
+ *      WIDER than "a deliberate `x as Json` cast": TypeScript types an
+ *      object-literal getter by its RETURN type, so `{ get x() { return
+ *      1; } }` satisfies `Json` with NO cast anywhere —
+ *      `const asJson: Json = { get x() { return 1; } }` compiles clean.
+ *      `isPlainData` rejects any own accessor property, without ever
+ *      invoking it, because nothing requires two reads of a getter to
+ *      agree — a value whose reads are not stable breaks this file's
+ *      "same input, same fingerprint, always" premise exactly as badly as
+ *      a closure would, cast or no cast. The plain-cast case still mirrors
+ *      decision-engine's own `__tests__/brand-casts.test.ts` precedent.
+ *      `assertPlainData` calls this at every construction boundary this
+ *      milestone controls (`makeWorld` below) so the guarantee holds for
+ *      values built through the one blessed constructor, not merely for
+ *      values a careful author happened to type correctly.
+ *
+ *      KNOWN, UNCLOSED GAP — stated plainly, not softened: a hostile
+ *      `Proxy` defeats this walk entirely, and nothing in this milestone
+ *      defends against it. Every fact `isPlainData` learns about a value —
+ *      its own keys (`Object.getOwnPropertyNames`/`getOwnPropertySymbols`),
+ *      its prototype (`Object.getPrototypeOf`), its property descriptors,
+ *      its values (`Object.values`) — is answered by a trap
+ *      (`ownKeys`/`getPrototypeOf`/`getOwnPropertyDescriptor`/`get`) that a
+ *      `Proxy` fully controls. A `Proxy` can report "just one plain number
+ *      key, ordinary `Object.prototype`, no accessors here" to every one of
+ *      those calls while a function-valued or unstable property is really
+ *      reachable on it by name. `isPlainData` has no way to distinguish
+ *      that `Proxy` from an honest plain object, in Node or a browser,
+ *      without a runtime-specific, easily-bypassed check (e.g. Node's
+ *      `util.types.isProxy`, deliberately not used here — it doesn't exist
+ *      in a browser, and a `Proxy` wrapping a `Proxy` defeats naive
+ *      detection anyway). See `__tests__/world.test.ts`'s "KNOWN
+ *      LIMITATION" test for a working demonstration of exactly this gap,
+ *      not a fix for it.
  *
  * WHY THIS MATTERS BEYOND "clean code": `World.data` is what gets hashed
  * (`fingerprint`), diffed (`Delta`), recorded into an audit-style trail,
@@ -72,20 +98,57 @@ export interface World<TState extends Json> {
 }
 
 /**
+ * True if `value` has any own accessor property — a `get` and/or `set`
+ * — enumerable or not, on a plain object OR at an array index. Checked
+ * via `Object.getOwnPropertyDescriptor`, which reads the descriptor
+ * without ever invoking the accessor itself, so a stateful getter (like
+ * the `n++`-on-every-read example this guards against — see
+ * `__tests__/world.test.ts`) is never triggered as a side effect of this
+ * check. See the file header's point 2 for why an accessor property is
+ * rejected even though it is not a function: nothing requires two reads
+ * of it to agree, which is exactly the property `isPlainData` exists to
+ * guarantee.
+ *
+ * Does NOT and cannot detect a `Proxy` presenting a fabricated,
+ * accessor-free view of itself — see the file header's "KNOWN, UNCLOSED
+ * GAP" paragraph. This function is honest about plain objects and arrays
+ * only.
+ */
+function hasOwnAccessorProperty(value: object): boolean {
+  for (const key of Object.getOwnPropertyNames(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor && (descriptor.get !== undefined || descriptor.set !== undefined)) return true;
+  }
+  return false;
+}
+
+/**
  * Runtime companion to the `Json` type constraint — see the file header's
  * "two ways at once" reasoning. Walks a value depth-first and returns
  * `false` the moment it finds anything that is not a plain primitive,
  * plain array, or plain object: a function, a symbol-keyed property, a
  * `Date`/`Map`/`Set`/class instance (anything whose prototype is not
- * `Object.prototype` or `null`), or a circular reference (which
- * `JSON.stringify`-based hashing could not handle anyway and which this
- * project never needs — `World.data` describes a snapshot, not a live
- * object graph).
+ * `Object.prototype` or `null`), an accessor property (a getter and/or
+ * setter — see `hasOwnAccessorProperty` above and the file header's point
+ * 2: TypeScript types an object-literal getter by its return type, so
+ * this needs no cast to defeat the type system), or a circular reference
+ * (which `JSON.stringify`-based hashing could not handle anyway and which
+ * this project never needs — `World.data` describes a snapshot, not a
+ * live object graph).
  *
  * Deliberately conservative rather than merely "not a function": a
  * `Map`/`Set`/`Date` would pass a naive "typeof !== 'function'" check and
  * still break `fingerprint`'s hash (see `fingerprint.ts`) the same way a
  * closure would — silently, and only when hashed, not when constructed.
+ *
+ * NOT airtight — see the file header's "KNOWN, UNCLOSED GAP" paragraph. A
+ * `Proxy` that fabricates its own `ownKeys`/`getOwnPropertyDescriptor`/
+ * `getPrototypeOf` answers can hide a function-valued or accessor property
+ * from every check this function makes. This function defends the honest
+ * "someone built a plain object/array and it happens to contain a bad
+ * value" case and the "someone cast around the type system" case; it does
+ * not and cannot defend against a value engineered specifically to lie to
+ * reflection APIs.
  */
 export function isPlainData(value: unknown, seen: ReadonlySet<unknown> = new Set()): boolean {
   if (value === null) return true;
@@ -96,6 +159,10 @@ export function isPlainData(value: unknown, seen: ReadonlySet<unknown> = new Set
   // t === "object" from here on.
   if (seen.has(value)) return false; // circular reference: not plain, structured-clone-hostile.
   const nextSeen = new Set(seen).add(value as object);
+
+  // Checked BEFORE any value is read off `value`, so a stateful getter is
+  // never invoked as a side effect of walking past it.
+  if (hasOwnAccessorProperty(value as object)) return false;
 
   if (Array.isArray(value)) {
     return value.every((entry) => isPlainData(entry, nextSeen));
