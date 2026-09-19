@@ -206,3 +206,25 @@ not cheating: a discarded real transaction *is* a valid, maximally accurate shad
   `.genesis/decisions/0001-contracts.md`. `npm test -- contracts`: 7 test files, 42 tests, all passing.
   `npm run typecheck` clean on both tsconfigs. `npm run build` succeeds. Awaiting independent (L4)
   verification — not marked done in `DONE.html`.
+- M2 (L1 BUILD): `app/api/health/route.ts` added — `force-dynamic` + Node.js runtime, reports
+  `VERCEL_GIT_COMMIT_SHA` (falls back to `"unknown (local dev)"`, never a fabricated SHA, when unset), and
+  runs a real check against M1's frozen `lib/contracts` (`computeFingerprint` key-order independence,
+  `assertPlainData` actually rejecting a function-bearing value at runtime) rather than a bare liveness
+  ping — adapted from decision-engine's `app/api/health/route.ts`, scoped down to what M1 actually built
+  (no `lib/simulate`/`lib/reconcile`/`lib/rollback` exist yet). `app/milestones.ts` +
+  `app/milestones.test.ts` added (the drift-guard mechanism, copied from decision-engine): zero milestones
+  are marked `done` in either place, matching `DONE.html`'s own all-`todo` status table — `app/page.tsx`
+  rewritten to read progress from that module instead of hardcoded prose, and now says plainly that no
+  simulator/reconciliation/rollback engine exists yet. `next.config.ts` (already present from the M1
+  repo-setup commit) had its worked-example comment corrected to reference this repo's own
+  `lib/contracts`/`app/api/health` verification instead of decision-engine's cost-model wording, which had
+  been carried over verbatim and no longer matched what this repo actually contains. No `vercel.json` added
+  — Next.js zero-config detection is sufficient, matching decision-engine's own precedent of not adding one.
+  `npm ci`: clean install, rolldown binding survives. `npm run typecheck`: clean, both tsconfigs.
+  `npm test`: 8 test files, 44 tests, all passing. `npm run build` (`next build --webpack`) succeeds;
+  `/api/health` resolves as a dynamic (ƒ) route, not statically prerendered. `npm run dev` + `curl` verified
+  both the local-dev fallback (`"commit":"unknown (local dev)"`) and the Vercel-style path
+  (`VERCEL_GIT_COMMIT_SHA` set to the real HEAD SHA, reported verbatim). `git diff main -- lib` empty —
+  frozen boundary untouched. **Deployment itself has not happened** — the Vercel import is a human step this
+  agent cannot perform; the repo is import-ready and the PR names the exact steps. Not marked done in
+  `DONE.html`, and cannot be until a real `$DEPLOY_URL` answers the demo command.
