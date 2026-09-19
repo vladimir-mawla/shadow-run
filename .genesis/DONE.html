@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DONE — shadow-run</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --ink:#e6edf3; --mut:#8b949e;
+          --ok:#2ea043; --warn:#d29922; --bad:#f85149; --accent:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.55 ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:920px; margin:0 auto; padding:32px 24px 80px; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  h2 { font-size:18px; margin:32px 0 12px; border-bottom:1px solid var(--line); padding-bottom:6px; }
+  .sub { color:var(--mut); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin:12px 0; }
+  .locked { border-left:3px solid var(--warn); }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--mut); font-weight:600; }
+  code { background:#1f2630; padding:1px 6px; border-radius:5px; font-size:13px; }
+  .gate { display:flex; gap:10px; align-items:flex-start; padding:6px 0; }
+  .box { width:16px; height:16px; border:1.5px solid var(--mut); border-radius:4px; flex:0 0 auto; margin-top:2px; }
+  .done .box { background:var(--ok); border-color:var(--ok); }
+  .done .label { color:var(--mut); text-decoration:line-through; }
+  .pill { display:inline-block; font-size:11px; padding:2px 8px; border-radius:999px; border:1px solid var(--line); color:var(--mut); }
+  .pill.ok{color:var(--ok);border-color:var(--ok);} .pill.wip{color:var(--warn);border-color:var(--warn);} .pill.todo{color:var(--mut);border-color:var(--mut);}
+  .note { color:var(--mut); font-size:13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>DONE — shadow-run</h1>
+  <p class="sub">The single source of truth for <b>what "done" means</b> and <b>the implementation plan</b>.
+     This file is LOCKED — the driver model may not edit it without explicit user request.
+     Updated: 2026-09-20</p>
+
+  <!-- ───────────── THE LOCKED SPEC ───────────── -->
+  <h2>1 · The Locked Spec (what we are building)</h2>
+  <div class="card locked">
+    <p><b>Cognitive job:</b> Given a proposed write, project its effect against a cloned snapshot of the
+       state it touches, gate real execution on a rollback path already existing (or an explicit human
+       escalation when it doesn't), execute for real, then mechanically check the observed effect against
+       the prediction. Divergence is not just logged — it flips a per-action-type trust gate into a
+       stricter mode. "Simulate before you act": the mechanic is shadow execution, not narration — see
+       <code>sim-plan.md</code> §A.1–§A.4 for the full reasoning and the three-way choice on where a
+       projection comes from.</p>
+    <p><b>Inputs:</b> an <code>Action</code> (domain, type, parameters — this project's own job, never
+       decision-engine's cost/reversibility model) and a <code>World&lt;TState&gt;</code> (a typed,
+       versioned, hashed snapshot of exactly the state slice the action touches). &nbsp;→&nbsp;
+       <b>Outputs:</b> a <code>ProjectedEffect</code> (a typed diff, never a sentence), later a
+       <code>Reconciliation</code> (predicted vs. observed — the falsifiability mechanism) and, when
+       needed, a <code>Rollback</code> that actually runs and is verified to restore prior state.</p>
+    <p><b>Autonomy level:</b> Fully autonomous for a write whose rollback is <code>runnable</code> and whose
+       action type's trust gate hasn't tripped — but a write with an <code>unavailable</code> rollback
+       cannot pass through execute silently; it requires an explicit human sign-off first (§A.4). A
+       repeatedly-wrong <code>project()</code> for a given action type mechanically forces that type into a
+       stricter mode (pre-validated rollback or human sign-off) via <code>SimulatorTrust</code>'s
+       reset-on-success counter (§A.3) — nobody has to notice the drift and manually intervene for the gate
+       to flip.</p>
+    <p><b>Failure tolerance:</b> Fail toward the least reversible-harm outcome. A stale <code>World</code>
+       version, a hash mismatch, or an unproven rollback must push toward <code>unavailable</code>/escalate,
+       never toward a silent execute. There is deliberately no LLM anywhere in the projection path —
+       <code>lib/simulate/**</code> (M3) is grep-tested to contain zero LLM-client and zero network imports,
+       so "you're just asking a model to guess" is falsifiable and false by construction. &nbsp;|&nbsp;
+       <b>Trust boundary:</b> a projection is untrusted until it has been reconciled against a real,
+       observed effect at least once; an action type's own history of reconciliations is what the trust gate
+       reads, never a domain's own self-report of how reliable it is.</p>
+    <p class="note">Filled during Genesis step G0 (Cognitive Design), following the shape used in
+       <code>decision-engine/.genesis/DONE.html</code> (this project's infrastructure sibling) — content is
+       project-specific, structure only is borrowed.</p>
+  </div>
+
+  <!-- ───────────── DEFINITION OF DONE ───────────── -->
+  <h2>2 · Definition of Done (binary gates — checked by the VERIFIER, not the maker)</h2>
+  <div class="card">
+    <div class="gate"><span class="box"></span><span class="label">Dependency direction inward, zero cycles <span class="note">(modular-architecture gate)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label"><code>npm run typecheck</code> clean AND <code>npm test</code> green</span></div>
+    <div class="gate"><span class="box"></span><span class="label">One <code>verify</code> pass by a <b>separate</b> agent/model (L4)</span></div>
+    <div class="gate"><span class="box"></span><span class="label">No milestone's freeze boundary touched by a later milestone <span class="note">(freeze-boundary gate — the independent verifier's first job on every milestone)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label"><code>lib/simulate/**</code> contains zero LLM-client, <code>fetch</code>, or <code>node:</code> imports <span class="note">(no-story-generator gate, from M3)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label">A <code>Rollback.runnable</code>'s <code>steps</code> is real data, actually executed through <code>applyDeltas</code> against real mutated state — never a mocked closure or an untested claim <span class="note">(rollback-is-proven gate, from M5/M7)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label">Every <code>drifted</code>/<code>unprojected</code> reconciliation provably feeds <code>SimulatorTrust</code>'s counter, and the counter provably flips a real gate at threshold <span class="note">(consequence gate, from M4)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label">No field on <code>ProjectedEffect</code> accepts free text where a model's prose could sit <span class="note">(typed-not-narrated gate, from M1)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label">The live demo URL runs the §B scenario (clean run + injected concurrent change) end-to-end from a click <span class="note">(deliverable gate — the brief requires a live demo)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label">A clean clone plus install plus test passes with no credentials configured <span class="note">(clean-clone gate)</span></span></div>
+    <p class="note">A milestone is DONE only when every applicable box above is checked by the verifier.
+       There is deliberately no LLM in the simulation path, so any generic "LLM schema-validation" gate from
+       a template does not apply here and was dropped.</p>
+  </div>
+
+  <!-- ───────────── IMPLEMENTATION PLAN ───────────── -->
+  <h2>3 · Implementation Plan (the work, sliced into milestones)</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>#</th><th>Milestone</th><th>Phase</th><th>Demo command (proves it works)</th><th>Loops</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td>M1</td><td>Contracts: World, ProjectedEffect, Reconciliation, Rollback</td><td>BUILD</td><td><code>npm test -- contracts</code></td><td>L1, L4</td><td><span class="pill todo">todo</span></td></tr>
+        <tr><td>M2</td><td>Deploy a live skeleton to Vercel</td><td>DEPLOY</td><td><code>curl -sf $DEPLOY_URL/api/health</code></td><td>L1, L4</td><td><span class="pill todo">todo</span></td></tr>
+        <tr><td>M3</td><td>The shadow-execution engine (<code>simulate()</code>)</td><td>BUILD</td><td><code>npm test -- simulate</code></td><td>L1, L4</td><td><span class="pill todo">todo</span></td></tr>
+        <tr><td>M4</td><td>Reconciliation and the trust feedback loop</td><td>BUILD</td><td><code>npm test -- reconcile</code></td><td>L1, L4</td><td><span class="pill todo">todo</span></td></tr>
+        <tr><td>M5</td><td>Rollback engine: compensations that actually run</td><td>BUILD</td><td><code>npm test -- rollback</code></td><td>L1, L4</td><td><span class="pill todo">todo</span></td></tr>
+        <tr><td>M6</td><td>Domains: four adapters wired to simulate → execute → reconcile → rollback</td><td>INTEGRATE</td><td><code>npm run demo:domains</code></td><td>L1, L4</td><td><span class="pill todo">todo</span></td></tr>
+        <tr><td>M7</td><td>The failure suite (the one deliberate-failure milestone)</td><td>VERIFY</td><td><code>npm test -- failures</code></td><td>L1, L4</td><td><span class="pill todo">todo</span></td></tr>
+        <tr><td>M8</td><td>The interactive demo</td><td>BUILD</td><td>deployed URL runs the §B scenario end-to-end from a click</td><td>L1, L4</td><td><span class="pill todo">todo</span></td></tr>
+        <tr><td>M9</td><td>Deliverables</td><td>RELEASE</td><td><code>git clone ... && npm ci && npm run typecheck && npm test</code></td><td>L1, L4</td><td><span class="pill todo">todo</span></td></tr>
+      </tbody>
+    </table>
+    <p class="note">Total token budget = 9 milestones × 150000. Update <span class="pill wip">wip</span> /
+       <span class="pill ok">done</span> as loops complete — a milestone only flips to <code>done</code>
+       after independent (L4) verification, never by the building agent marking its own work. This table is
+       mirrored in <code>PLAN.md</code> for the agent to parse.</p>
+  </div>
+
+</div>
+</body>
+</html>
