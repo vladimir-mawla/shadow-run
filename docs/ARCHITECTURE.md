@@ -182,7 +182,7 @@ passes every gate above cleanly, every time — this is argued at length in `sim
 checked directly while writing this document: no test in this suite exercises that specific shape, so it is
 reported here as a real, undemonstrated gap rather than something a test happens to pin.
 
-## Stage 3 — Reconciliation (`lib/reconcile/reconcile.ts`)
+## Stage 3 — Reconciliation (`lib/reconcile/reconcile.ts`, `lib/reconcile/trust.ts`)
 
 **Job:** mechanically diff a predicted `Delta[]` against an observed `Delta[]` from two real snapshots, and
 report exactly one of three outcomes — `confirmed` / `drifted` / `unprojected` — with no heuristic and no
@@ -231,6 +231,32 @@ reachable by a second, deliberately sliced `reconcile()` call, the exact techniq
 prescribes. `docs/WALKTHROUGH.md` and the live demo both show this second card rather than papering over the
 first, and `.genesis/decisions/0003-reconcile.md`/PR #17 record it as a corrected claim, not a quietly patched
 one.
+
+**The trust feedback loop (`trust.ts`) belongs in this stage's scope, and stating its one real limitation at
+full strength is the most important disclosure in this document, not a footnote to it.** `updateTrust`
+mechanically advances or resets `SimulatorTrust.consecutiveNonConfirmed` from a `Reconciliation.status`
+alone, and `requiresPreValidatedRollback` correctly reports `true` once that counter reaches
+`DEFAULT_TRUST_THRESHOLD` consecutive non-confirmed calls — both proven directly, by real arithmetic, in
+`lib/reconcile/__tests__/trust.test.ts`. **But nothing in this repository consults that answer before
+deciding whether to run a rollback.** `components/InventoryDemo.tsx` calls `updateTrust` and displays the
+resulting counter to the viewer — it never calls `requiresPreValidatedRollback` at all. Every domain's own
+call shape (`simulate → execute → reconcile → proposeRollback → runRollback`) runs `runRollback`
+unconditionally whenever `reconciliation.status !== "confirmed"`, regardless of what the trust counter says.
+This is exactly the risk this project's own plan named for itself before any code existed — "divergence is
+detected and logged, but nothing downstream changes... a dashboard nobody acts on" — and it is true of the
+shipped system today, not a hypothetical the plan warned about and then closed.
+*Tests:* `tests/failures/case-5-gate-never-consulted.test.ts` — full pin on the gate's own arithmetic and a
+spied demonstration that the ordinary call shape proceeds to a fourth real execution unconditionally once
+the gate has already flipped `true`; an honest partial pin (a textual search over today's non-test source,
+stated as exactly that — a search over what is committed, not a guarantee about all future code) proving
+`requiresPreValidatedRollback` appears in no non-test file under `lib/contracts`, `lib/simulate`,
+`lib/rollback`, `domains`, `scripts`, or `app`. **A sharper gap than that test's own header claims, found by
+reading its `SCAN_ROOTS` list directly rather than trusting the header's "no shipped source" wording:** this
+list has six entries and `components/**` — merged two milestones later, at M8, and the one directory a
+judge-facing UI actually lives in — is not one of them. Checked separately, by direct inspection rather than
+by this test: `components/InventoryDemo.tsx` imports and calls `updateTrust`, never
+`requiresPreValidatedRollback`, so the underlying claim still holds — but the merged test that is supposed to
+prove it does not actually scan the directory where the strongest counter-example would live.
 
 ## Stage 4 — Rollback (`lib/rollback/apply-deltas.ts`, `run-rollback.ts`)
 

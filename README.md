@@ -3,7 +3,17 @@
 **Simulate before you act.** An agent projects the effects of a write before executing it — a typed diff
 against a cloned snapshot, never a sentence — with a rollback path computed in front of every write. The
 projection is checked against what actually happened (reconciliation), and a run of consecutive
-non-confirmed reconciliations gates future writes behind a stricter check (the trust feedback loop).
+non-confirmed reconciliations is counted by a trust feedback loop that computes exactly when a domain
+*should* require a pre-validated rollback.
+
+**That counter is a dashboard today, not a gate — stated plainly, not softened.** `updateTrust` runs on
+every real execution and the live demo displays the number, but no caller anywhere in this repository — no
+domain, no script, no page — reads `requiresPreValidatedRollback`'s answer before deciding whether to run a
+rollback. `tests/failures/case-5-gate-never-consulted.test.ts` proves it: the gate flips to `true` for real,
+and the ordinary call shape every domain uses proceeds to another real execution anyway. This is the exact
+risk the project's own plan named at the outset — divergence detected and counted, with no consequence —
+currently true of the shipped system, not merely a hypothetical the plan warned about. See
+`docs/ARCHITECTURE.md`'s Reconciliation section for the full account.
 
 No credentials, API keys, or secrets are needed to run this anywhere — locally or deployed. Every domain in
 this repository is self-contained, in-memory, and synthetic; `lib/simulate/**` is architecturally
@@ -45,7 +55,7 @@ npm run dev     # http://localhost:3000 — the interactive demo
 
 ```sh
 npm run typecheck   # tsc -p tsconfig.lib.json && tsc -p tsconfig.json, both clean
-npm test            # vitest run -- 29 files / 293 tests
+npm test            # vitest run -- 29 files / 337 tests
 npm run build       # next build --webpack
 npm run demo:domains  # all seven domain cases, end to end, against the real engine
 ```
@@ -64,7 +74,7 @@ cd "$(mktemp -d)" && git clone https://github.com/vladimir-mawla/shadow-run . &&
 ```
 
 It clones `main` — which is 8 of 9 milestones (M9, this one, isn't on `main` yet) — installs with zero
-credentials configured, typechecks clean, and runs **29 test files / 293 tests, all passing**. Run for real
+credentials configured, typechecks clean, and runs **29 test files / 337 tests, all passing**. Run for real
 against a fresh temp directory while writing this document, not assumed.
 
 ## Check the live deployment

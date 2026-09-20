@@ -38,36 +38,49 @@ files / 293 tests; PR #15 added 44 tests to existing files, no new test files.)
 
 ## 2. Every PR
 
-From `gh pr list --state all --limit 50`, with merge timestamps and `gh api .../pulls/N/reviews` counts:
+From `gh pr list --state all --limit 50 --json number,title,createdAt,mergedAt,state` and
+`gh api .../pulls/N/reviews` counts. **Correction, named rather than silently fixed:** an earlier revision of
+this table labeled its fourth column "Merged" but had actually populated 18 of 19 rows with each PR's
+*creation* timestamp (`createdAt`), not its merge timestamp (`mergedAt`) — only #15 happened to show a true
+merge time, because that PR's own three-round review made the gap between the two large enough to be
+visually obvious. The two are close for most of these PRs (this project moved fast) but not identical, and
+for #2 and #3 the difference crosses midnight: both were *created* 09-19, but *merged* 09-20. Repopulated
+below with real `mergedAt` values, re-queried directly rather than patched from the wrong field:
 
-| # | Title | Branch → base | State | Merged | Reviews |
+| # | Title | Branch → base | State | Merged (`mergedAt`) | Reviews |
 |---|---|---|---|---|---|
-| 1 | M1 — Contracts | `m1-contracts-final` → `empty-base` | CLOSED | — | 0 |
-| 2 | M2: Deploy skeleton | `m2-deploy` → `main` | MERGED | 2026-09-19 23:38 | 0 |
-| 3 | M1 fixes | `m1-fixes` → `main` | MERGED | 2026-09-19 23:54 | 0 |
-| 4 | Mark M2 done | `mark-m2-done` → `main` | MERGED | 2026-09-20 11:07 | 0 |
-| 5 | M3: shadow-execution engine | `m3-simulate` → `main` | MERGED | 2026-09-20 11:34 | 0 |
-| 6 | M4: Reconciliation + trust loop | `m4-reconcile` → `main` | MERGED | 2026-09-20 11:38 | 0 |
-| 7 | Mark M4 done | `mark-m4-done` → `main` | MERGED | 2026-09-20 11:53 | 0 |
-| 8 | M5: Rollback engine | `m5-rollback` → `main` | MERGED | 2026-09-20 12:11 | 0 |
-| 9 | Bring CURRENT.md up to date | `checkpoint-m4-m5` → `main` | MERGED | 2026-09-20 12:28 | 0 |
-| 10 | Mark M3 and M5 done | `mark-m3-m5-done` → `main` | MERGED | 2026-09-20 12:31 | 0 |
-| 11 | M7 (PARTIAL): Cases 2, 3, 4 | `m7-failures` → `main` | MERGED | 2026-09-20 13:12 | 0 |
-| 12 | Correct Case 4's fingerprint-immunity claim | `fix-m7-fingerprint-claim` → `main` | MERGED | 2026-09-20 13:23 | 0 |
-| 13 | M6: Domains | `m6-domains` → `main` | MERGED | 2026-09-20 13:32 | 0 |
-| 14 | M8: interactive demo | `m8-components` → `main` | MERGED | 2026-09-20 13:38 | 0 |
+| 1 | M1 — Contracts | `m1-contracts-final` → `empty-base` | CLOSED | — (never merged) | 0 |
+| 2 | M2: Deploy skeleton | `m2-deploy` → `main` | MERGED | 2026-09-20 01:16 | 0 |
+| 3 | M1 fixes | `m1-fixes` → `main` | MERGED | 2026-09-20 00:19 | 0 |
+| 4 | Mark M2 done | `mark-m2-done` → `main` | MERGED | 2026-09-20 11:11 | 0 |
+| 5 | M3: shadow-execution engine | `m3-simulate` → `main` | MERGED | 2026-09-20 12:29 | 0 |
+| 6 | M4: Reconciliation + trust loop | `m4-reconcile` → `main` | MERGED | 2026-09-20 11:52 | 0 |
+| 7 | Mark M4 done | `mark-m4-done` → `main` | MERGED | 2026-09-20 11:55 | 0 |
+| 8 | M5: Rollback engine | `m5-rollback` → `main` | MERGED | 2026-09-20 12:23 | 0 |
+| 9 | Bring CURRENT.md up to date | `checkpoint-m4-m5` → `main` | MERGED | 2026-09-20 13:17 | 0 |
+| 10 | Mark M3 and M5 done | `mark-m3-m5-done` → `main` | MERGED | 2026-09-20 12:52 | 0 |
+| 11 | M7 (PARTIAL): Cases 2, 3, 4 | `m7-failures` → `main` | MERGED | 2026-09-20 13:17 | 0 |
+| 12 | Correct Case 4's fingerprint-immunity claim | `fix-m7-fingerprint-claim` → `main` | MERGED | 2026-09-20 13:55 | 0 |
+| 13 | M6: Domains | `m6-domains` → `main` | MERGED | 2026-09-20 13:47 | 0 |
+| 14 | M8: interactive demo | `m8-components` → `main` | MERGED | 2026-09-20 14:36 | 0 |
 | 15 | Fix M3 append rule + architecture-guard bypasses | `fix-m3-append-and-tokenizer` → `main` | MERGED | 2026-09-20 15:41 | 0 |
-| 16 | M7: Cases 1 and 5 | `m7-cases-1-and-5` → `main` | MERGED | 2026-09-20 14:08 | 0 |
-| 17 | Mark M7 done | `mark-m7-done` → `main` | MERGED | 2026-09-20 14:17 | 0 |
-| 18 | Mark M6 done | `mark-m6-done` → `main` | MERGED | 2026-09-20 14:26 | 0 |
-| 19 | Mark M8 done | `mark-m8-done` → `main` | MERGED | 2026-09-20 14:39 | 0 |
+| 16 | M7: Cases 1 and 5 | `m7-cases-1-and-5` → `main` | MERGED | 2026-09-20 14:15 | 0 |
+| 17 | Mark M7 done | `mark-m7-done` → `main` | MERGED | 2026-09-20 14:25 | 0 |
+| 18 | Mark M6 done | `mark-m6-done` → `main` | MERGED | 2026-09-20 14:28 | 0 |
+| 19 | Mark M8 done | `mark-m8-done` → `main` | MERGED | 2026-09-20 14:42 | 0 |
+| 20 | M9: Deliverables (this PR) | `m9-deliverables` → `main` | OPEN | — (not merged) | 0 |
 
-**Every one of these 19 PRs has zero entries under `gh api repos/.../pulls/N/reviews`** — confirmed directly
-for all 19, not assumed from the pattern holding for the first few. GitHub's formal review feature was never
-used anywhere in this repository's history; whatever independent verification happened is recorded, if at
-all, in PR body prose or a PR issue-comment, never as a `gh`-visible review. PR #1 is `CLOSED`, not merged —
-its own body explains why: an early repo-setup error pushed work directly to `main`, and `empty-base` was
-created as a clean replacement default branch rather than force-rewriting history.
+Note on #9 vs. #10: #9 was *created* before #10 (12:28 vs. 12:31) but *merged* after it (13:17 vs. 12:52) —
+real interleaving, not a table error. PR numbers track creation order; this column tracks completion order,
+and the two need not agree.
+
+**Every one of PRs 1 through 19 has zero entries under `gh api repos/.../pulls/N/reviews`** (PR #20, this
+one, is still open and also has zero) — confirmed directly for all 20, not assumed from the pattern holding
+for the first few. GitHub's formal review feature was never used anywhere in this repository's history;
+whatever independent verification happened is recorded, if at all, in PR body prose or a PR issue-comment,
+never as a `gh`-visible review. PR #1 is `CLOSED`, not merged — its own body explains why: an early
+repo-setup error pushed work directly to `main`, and `empty-base` was created as a clean replacement default
+branch rather than force-rewriting history.
 
 **PR #15 merged mid-session, as commit `48fdd8b` directly onto `main`'s tip.** For most of this session it
 was open — a deliberate, authorized reopening of frozen `lib/simulate/**` and `domains/__tests__/**` to fix
@@ -190,6 +203,29 @@ Cumulative across the project's whole history, cited to the PR/commit that repor
 
 ## 5. What is genuinely incomplete or open, as of this commit (`main` at `48fdd8b`)
 
+- **The trust feedback loop computes a gate that nothing consults — the most important limit in this
+  section, and one this document did not name until a review of `README.md` caught its absence.** This
+  project's own plan named the risk before any code existed: "divergence is detected and logged, but nothing
+  downstream changes... a dashboard nobody acts on." That risk is true of the shipped system today, not a
+  closed hypothetical. `updateTrust` runs on every real execution and `lib/reconcile/trust.ts`'s
+  `requiresPreValidatedRollback` correctly flips to `true` at `DEFAULT_TRUST_THRESHOLD` consecutive
+  non-confirmed reconciliations — both proven by real arithmetic in `lib/reconcile/__tests__/trust.test.ts`.
+  But no caller anywhere in this repository reads that answer before running a rollback:
+  `components/InventoryDemo.tsx` calls `updateTrust` and displays the resulting counter to the viewer, never
+  `requiresPreValidatedRollback`; every domain's own call shape runs `runRollback` unconditionally once
+  `reconciliation.status !== "confirmed"`, with no branch on trust anywhere.
+  `tests/failures/case-5-gate-never-consulted.test.ts` (merged with M7) proves this directly: a spied
+  demonstration that the ordinary call shape proceeds to a fourth real execution unconditionally once the
+  gate has already flipped, plus a textual search over non-test source confirming the identifier is absent
+  outside `lib/reconcile/**`. **That search is itself narrower than its own header claims, found by reading
+  its `SCAN_ROOTS` list directly rather than trusting the header's wording:** the list has six entries —
+  `lib/contracts`, `lib/simulate`, `lib/rollback`, `domains`, `scripts`, `app` — and does not include
+  `components/**`, which merged two milestones later at M8 and is the one directory the judge-facing UI
+  actually lives in. Checked separately, by direct inspection: `InventoryDemo.tsx` does not call
+  `requiresPreValidatedRollback` either, so the underlying claim still holds — but the merged test meant to
+  prove it does not actually scan the directory where the strongest counter-example would live. See
+  `docs/ARCHITECTURE.md`'s Stage 3 section (`lib/reconcile/trust.ts` is now in that stage's scope) and
+  `README.md`'s second paragraph for the same finding stated for a first-time reader.
 - **The architecture guard's remaining gaps are now real residue on `main`, not an unmerged branch's
   content — and two different claims about it must not be flattened into one.** Verified directly in this
   session against the merged code, not copied from PR #15's own body:
