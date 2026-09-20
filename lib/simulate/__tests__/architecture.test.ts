@@ -137,6 +137,68 @@ import { dirname, join, relative, resolve, sep } from "node:path";
  * checks stay). Three things had to be gotten right, each because a
  * naive `realpathSync` fix commonly gets it wrong:
  *
+ * FIX (independent verification, THIRD round — a working bypass, not a
+ * theoretical one): THE TOKENIZER TREATED A TEMPLATE LITERAL'S ENTIRE
+ * BACKTICK SPAN — INCLUDING ANY `${...}` INTERPOLATION INSIDE IT — AS ONE
+ * OPAQUE STRING, NEVER RE-ENTERING CODE MODE FOR WHAT IS ACTUALLY LIVE
+ * CODE. Confirmed as a real, working evasion, not assumed:
+ *
+ *     export const x = `${await fetch("https://example.com")}`;
+ *
+ * passed this file's guard UNTOUCHED before this fix — `fetch(` sits
+ * inside a `${...}` interpolation, and the old tokenizer's string-content
+ * loop (below) copied everything between the opening and closing
+ * backtick into `content` character-by-character with no awareness that
+ * `${`...`}` is a boundary back into real, executable code. `codeTail`
+ * (what `isBareFetchIdentifier` inspects) was never fed a single
+ * character from inside the backticks, so the call was structurally
+ * invisible to the scan. The exact same mechanism would just as happily
+ * hide a `require(`/`import(` specifier assembled or written inside an
+ * interpolation.
+ *
+ * THE FIX: `tokenize` is now RE-ENTRANT. A template literal's content is
+ * scanned by `scanTemplateBody`, which — on hitting an actual, unescaped
+ * `${` — calls straight back into the SAME code-scanning function
+ * (`scanCode`, given an `isInterpolation` flag) to tokenize what is
+ * inside the braces as genuine code: comments, strings, nested template
+ * literals (recursively, to any depth), specifier contexts, and bare
+ * `fetch(` calls are all detected there exactly as they would be
+ * anywhere else in the file. `scanCode` returns control to
+ * `scanTemplateBody` at the interpolation's own matching, depth-tracked
+ * `}` (a plain brace counter scoped to that one call — `{`/`}` characters
+ * inside a nested string/template/comment never touch it, because those
+ * are fully consumed by their own recursive branches before the counter
+ * is ever reached), so `${ {a: 1}.a }`-style nested braces do not end the
+ * interpolation early. This is the same "re-enter code mode inside
+ * `${...}`" fix applied to both this file and `domains/__tests__
+ * /architecture.test.ts` (M6), which independently inherited the exact
+ * same tokenizer shape and the exact same gap for its own `await`-ban —
+ * see that file's header for its side of this fix.
+ *
+ * WHAT THIS FIX DOES AND DOES NOT COVER, STATED PLAINLY (see the
+ * "teeth"/"false-positive discipline" blocks below for the direct proof
+ * of each claim, not just this paragraph's word):
+ *   - CAUGHT: `fetch(`, a non-relative specifier, or a specifier that
+ *     escapes the allowed roots, written directly inside a `${...}`
+ *     interpolation, at any nesting depth (an interpolation inside a
+ *     nested template inside another interpolation, and so on).
+ *   - STILL NOT CAUGHT, BY DESIGN, NOT OVERSIGHT: anything that never
+ *     spells `fetch(` or a literal specifier string as CODE at all —
+ *     `globalThis["fetch"]`, a destructured/aliased reference
+ *     (`const f = fetch; f(url)`), a dynamically COMPUTED specifier
+ *     (`import(someVariable)`, where nothing resolvable is ever a string
+ *     literal in scan reach), or a keyword/URL typed out only inside an
+ *     ORDINARY (non-interpolated) string/comment meant to be handed to
+ *     `eval`/`Function(...)` later. Strings and comments stay
+ *     deliberately opaque as DATA even after this fix — re-scanning their
+ *     literal text for keywords is exactly the false-positive-prone
+ *     "cleverly parse a flexible surface" failure this file's own header
+ *     already argues against, and it is a different, unclosed gap from
+ *     the one this fix closes (a live `${...}` re-entering real code,
+ *     versus text that is never executed as code at all by this file's
+ *     own static scan). A hand-rolled tokenizer is not a real parser; it
+ *     is stated at exactly that strength, not oversold as airtight.
+ *
  *   1. `realpathSync` THROWS on a path that does not exist — and every
  *      real, legitimate specifier in this codebase's own source ends in
  *      `.js` while pointing at a same-named `.ts` file on disk (this
@@ -231,78 +293,171 @@ function isBareFetchIdentifier(codeTail: string): boolean {
 
 /**
  * Tokenizes `source` exactly the way `framework-free.test.ts` does (block/
- * line comments and string/template-literal CONTENTS are opaque spans,
- * never re-scanned, never allowed to feed a context check on either
- * side), extended to ALSO watch for a bare `fetch(` call in the non-
- * string, non-comment code stream. One pass, two things collected, so
- * both checks see the exact same "what is really code" view of the file.
+ * line comments and ORDINARY string contents are opaque spans, never
+ * re-scanned, never allowed to feed a context check on either side),
+ * extended to ALSO watch for a bare `fetch(` call in the non-string,
+ * non-comment code stream. One pass, two things collected, so both checks
+ * see the exact same "what is really code" view of the file.
+ *
+ * RE-ENTRANT ACROSS `${...}` (see file header's "FIX (THIRD round)"): a
+ * template literal's own content is scanned by `scanTemplateBody`, and
+ * every `${` INSIDE it hands control straight back to `scanCode` — the
+ * same function doing the top-level scan — so code hidden inside an
+ * interpolation is tokenized as code, not skipped as string data, no
+ * matter how deeply nested. `scanCode` and `scanTemplateBody` are mutual
+ * recursion, not a linear pass, and both close over `specifiers`,
+ * `bareFetchCalls`, and `line` so every call site accumulates into the
+ * exact same result.
  */
 function tokenize(source: string): { specifiers: readonly FoundSpecifier[]; bareFetchCalls: readonly FoundBareFetchCall[] } {
   const specifiers: FoundSpecifier[] = [];
   const bareFetchCalls: FoundBareFetchCall[] = [];
   const n = source.length;
-  let i = 0;
   let line = 1;
-  let codeTail = "";
 
-  while (i < n) {
-    const c = source[i];
-    const next = source[i + 1];
+  /**
+   * Scans a template literal's contents, starting just AFTER its opening
+   * backtick (`start`). Ordinary characters accumulate into `content`
+   * (used for specifier text only when the whole template turns out to
+   * have NO interpolation at all — identical in spirit to the old
+   * `!content.includes("${")` guard, but now driven by an actual `${`
+   * detection rather than a post-hoc substring search, so an escaped
+   * `\${` that is not really an interpolation no longer over-excludes).
+   * On a genuine, unescaped `${`, hands off to `scanCode(..., true)` to
+   * tokenize the interpolation's own code — including, recursively, any
+   * further nested template literal `scanCode` encounters there — then
+   * resumes collecting template content after the matching `}`.
+   */
+  function scanTemplateBody(start: number): { nextIndex: number; content: string; sawInterpolation: boolean } {
+    let i = start;
+    let content = "";
+    let sawInterpolation = false;
 
-    if (c === "/" && next === "/") {
-      while (i < n && source[i] !== "\n") i++;
-      codeTail = "";
-      continue;
-    }
-
-    if (c === "/" && next === "*") {
-      i += 2;
-      while (i < n && !(source[i] === "*" && source[i + 1] === "/")) {
-        if (source[i] === "\n") line++;
-        i++;
+    while (i < n) {
+      const c = source[i];
+      if (c === "\\") {
+        content += c + (source[i + 1] ?? "");
+        if (source[i + 1] === "\n") line++;
+        i += 2;
+        continue;
       }
-      i += 2;
-      codeTail = "";
-      continue;
-    }
-
-    if (c === '"' || c === "'" || c === "`") {
-      const quote = c;
-      const startLine = line;
-      const specifierPosition = isSpecifierContext(codeTail);
-
-      let content = "";
-      i++; // step past opening quote
-      while (i < n && source[i] !== quote) {
-        if (source[i] === "\\") {
-          content += source[i] + (source[i + 1] ?? "");
-          if (source[i + 1] === "\n") line++;
-          i += 2;
-          continue;
-        }
-        if (source[i] === "\n") line++;
-        content += source[i];
-        i++;
+      if (c === "`") {
+        i++; // step past the closing backtick.
+        break;
       }
-      i++; // step past closing quote (or EOF, harmlessly)
-
-      if (specifierPosition && !content.includes("${")) {
-        specifiers.push({ specifier: content, line: startLine });
+      if (c === "$" && source[i + 1] === "{") {
+        sawInterpolation = true;
+        i = scanCode(i + 2, true); // re-enter code mode for the interpolation's contents.
+        i++; // step past the interpolation's own matching "}", which scanCode stopped AT rather than consumed.
+        continue;
       }
-
-      codeTail = ""; // the string is consumed; nothing on its far side may combine with code from before it.
-      continue;
+      if (c === "\n") line++;
+      content += c;
+      i++;
     }
 
-    if (c === "(" && isBareFetchIdentifier(codeTail)) {
-      bareFetchCalls.push({ line });
-    }
-
-    if (c === "\n") line++;
-    codeTail = (codeTail + c).slice(-60);
-    i++;
+    return { nextIndex: i, content, sawInterpolation };
   }
 
+  /**
+   * The main tokenizing pass — also re-entered for a `${...}`
+   * interpolation's own code (`isInterpolation: true`), in which case it
+   * stops AT (without consuming) the interpolation's matching unmatched
+   * `}` rather than running to end of source, so `scanTemplateBody` can
+   * resume the surrounding template text right after it. `braceDepth`
+   * tracks ONLY real, top-level-to-this-call `{`/`}` code characters
+   * (any inside a nested string/template/comment are consumed whole by
+   * their own branches below and never reach the counter), so a nested
+   * object literal like `${ {a: 1}.a }` does not end the interpolation
+   * at its own inner `}`.
+   */
+  function scanCode(start: number, isInterpolation: boolean): number {
+    let i = start;
+    let codeTail = "";
+    let braceDepth = 0;
+
+    while (i < n) {
+      const c = source[i];
+      const next = source[i + 1];
+
+      if (isInterpolation && c === "}" && braceDepth === 0) {
+        return i; // the interpolation's own closing brace — caller (scanTemplateBody) consumes it.
+      }
+
+      if (c === "/" && next === "/") {
+        while (i < n && source[i] !== "\n") i++;
+        codeTail = "";
+        continue;
+      }
+
+      if (c === "/" && next === "*") {
+        i += 2;
+        while (i < n && !(source[i] === "*" && source[i + 1] === "/")) {
+          if (source[i] === "\n") line++;
+          i++;
+        }
+        i += 2;
+        codeTail = "";
+        continue;
+      }
+
+      if (c === '"' || c === "'") {
+        const quote = c;
+        const startLine = line;
+        const specifierPosition = isSpecifierContext(codeTail);
+
+        let content = "";
+        i++; // step past opening quote
+        while (i < n && source[i] !== quote) {
+          if (source[i] === "\\") {
+            content += source[i] + (source[i + 1] ?? "");
+            if (source[i + 1] === "\n") line++;
+            i += 2;
+            continue;
+          }
+          if (source[i] === "\n") line++;
+          content += source[i];
+          i++;
+        }
+        i++; // step past closing quote (or EOF, harmlessly)
+
+        if (specifierPosition) specifiers.push({ specifier: content, line: startLine });
+
+        codeTail = ""; // the string is consumed; nothing on its far side may combine with code from before it.
+        continue;
+      }
+
+      if (c === "`") {
+        const startLine = line;
+        const specifierPosition = isSpecifierContext(codeTail);
+
+        const { nextIndex, content, sawInterpolation } = scanTemplateBody(i + 1);
+        i = nextIndex;
+
+        if (specifierPosition && !sawInterpolation) {
+          specifiers.push({ specifier: content, line: startLine });
+        }
+
+        codeTail = "";
+        continue;
+      }
+
+      if (c === "(" && isBareFetchIdentifier(codeTail)) {
+        bareFetchCalls.push({ line });
+      }
+
+      if (c === "{") braceDepth++;
+      if (c === "}") braceDepth--;
+
+      if (c === "\n") line++;
+      codeTail = (codeTail + c).slice(-60);
+      i++;
+    }
+
+    return i;
+  }
+
+  scanCode(0, false);
   return { specifiers, bareFetchCalls };
 }
 
@@ -584,6 +739,28 @@ describe("lib/simulate/** never reaches an LLM, the network, or a Node built-in"
       const source = 'const result = fetch(`https://example.com/${id}`);';
       expect(tokenize(source).bareFetchCalls).toEqual([{ line: 1 }]);
     });
+
+    it("EXPLOIT REGRESSION (independent verification, THIRD round): a bare fetch(...) call hidden inside a template-literal ${...} interpolation is caught — this passed the guard UNTOUCHED before the re-entrant tokenizer fix", () => {
+      const source = 'export const x = `${await fetch("https://example.com")}`;';
+      const { bareFetchCalls } = tokenize(source);
+      expect(bareFetchCalls).toEqual([{ line: 1 }]);
+      // And end to end: this whole file (a fresh in-memory copy of the
+      // real exploit, not a name-only assertion) really would be flagged.
+      expect(bareFetchCalls.length).toBeGreaterThan(0);
+    });
+
+    it("EXPLOIT REGRESSION variant: a non-relative specifier hidden inside a ${...} interpolation (a dynamic import assembled inside the interpolation) is also caught", () => {
+      const source = "export const x = `${(() => import(`openai`))()}`;";
+      const { specifiers } = tokenize(source);
+      expect(specifiers).toContainEqual({ specifier: "openai", line: 1 });
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "openai")).toBe(false);
+    });
+
+    it("EXPLOIT REGRESSION variant: fetch(...) nested two interpolations deep is still caught — proves the re-entry is recursive, not one level only", () => {
+      const source = "export const x = `${`${await fetch(\"https://example.com\")}`}`;";
+      const { bareFetchCalls } = tokenize(source);
+      expect(bareFetchCalls).toEqual([{ line: 1 }]);
+    });
   });
 
   describe("false-positive discipline: only real specifiers/calls, never identifiers, comments, or unrelated strings", () => {
@@ -623,6 +800,34 @@ describe("lib/simulate/** never reaches an LLM, the network, or a Node built-in"
       const { specifiers, bareFetchCalls } = tokenize(line);
       expect(specifiers).toEqual([]); // the outer string is one opaque token; its own contents are never independently re-scanned.
       expect(bareFetchCalls).toEqual([]);
+    });
+
+    it("does NOT overtighten: a template literal containing the WORD 'await' as prose (no interpolation at all) is not flagged", () => {
+      const source = 'const msg = `please await nothing here, it is just words`;';
+      const { specifiers, bareFetchCalls } = tokenize(source);
+      expect(specifiers).toEqual([]);
+      expect(bareFetchCalls).toEqual([]);
+    });
+
+    it("does NOT overtighten: a benign NESTED template literal inside an interpolation is not flagged", () => {
+      const source = "const msg = `outer ${`inner ${name} text`} more`;";
+      const { specifiers, bareFetchCalls } = tokenize(source);
+      expect(specifiers).toEqual([]);
+      expect(bareFetchCalls).toEqual([]);
+    });
+
+    it("does NOT overtighten: an ordinary interpolation like `${count} items` is not flagged", () => {
+      const source = "const label = `${count} items`;";
+      const { specifiers, bareFetchCalls } = tokenize(source);
+      expect(specifiers).toEqual([]);
+      expect(bareFetchCalls).toEqual([]);
+    });
+
+    it("does NOT overtighten: a legitimate relative import specifier written inside a benign interpolation is still accepted, not merely un-flagged", () => {
+      const source = "const mod = `${(() => import(`./adapter.js`))()}`;";
+      const { specifiers } = tokenize(source);
+      expect(specifiers).toContainEqual({ specifier: "./adapter.js", line: 1 });
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "./adapter.js")).toBe(true);
     });
 
     it("does not false-positive on ordinary relative imports already used throughout this milestone", () => {
