@@ -63,6 +63,24 @@ describe("checkConsistency — the self-consistency check in isolation", () => {
     expect(result.problems.some((p) => p.includes('started at ["x","y","z"]') && p.includes('actually has ["a","b"]'))).toBe(true);
   });
 
+  it("DISCLOSED GAP (independent verification, MEDIUM finding), PINNED NOT FIXED: an 'append' whose 'after' SHRINKS the collection relative to an honest 'before' still passes — checkClaimedBefore verifies before is honest, never that after grew; see consistency.ts's 'DELIBERATELY NOT CHECKED' header note for why, matching effect-validation.ts's own increment-sign precedent", () => {
+    const data = { items: ["a", "b", "c"] };
+    const shrinkingAppend = {
+      deltas: [{ path: "items", before: ["a", "b", "c"], after: ["a", "b"], kind: "append" as const }],
+      resultingFingerprint: computeFingerprint({ items: ["a", "b"] }),
+      assumptions: [],
+      producedBy: "shadow-execution" as const,
+    };
+    const result = checkConsistency(data, shrinkingAppend);
+    // This asserts the DOCUMENTED, DELIBERATE behavior, not a desired
+    // one — a future milestone that wants to reject this must first
+    // answer the header's own open question (growth at what
+    // granularity, for what shapes), not flip this assertion in
+    // isolation.
+    expect(result.ok).toBe(true);
+    expect(result.problems).toEqual([]);
+  });
+
   it("LAYER 2: catches a resultingFingerprint that doesn't match what the deltas actually produce", () => {
     const wrongHash = { ...validEffectFor39(), resultingFingerprint: "00000000" };
     const result = checkConsistency({ reserved: 39 }, wrongHash);

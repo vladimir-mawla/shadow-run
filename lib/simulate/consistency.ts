@@ -68,6 +68,73 @@ import { deleteAtPath, getAtPath, PathResolutionError, setAtPath } from "./path.
  * this file in line with every other consumer of `Delta` in this
  * codebase.
  *
+ * NAMED GAP LEFT BY THE REOPENING, DISCLOSED RATHER THAN CLOSED (found by
+ * independent verification while reviewing the reopening above): dropping
+ * the `append`-must-start-`undefined` rule means `checkClaimedBefore` no
+ * longer checks anything about the RELATIONSHIP between `before` and
+ * `after` for an `append` — only that `before` is honest. An `append`
+ * whose `after` actually SHRINKS the collection, is a NO-OP, or is a
+ * wholesale unrelated replacement still passes, as long as `before`
+ * matches:
+ *
+ *     checkConsistency({ items: ["a","b","c"] }, { deltas: [{ path:
+ *     "items", before: ["a","b","c"], after: ["a","b"], kind: "append"
+ *     }], ... }) // → { ok: true }
+ *
+ * even though `after` has FEWER elements than `before` — the opposite of
+ * what "append" means in `delta.ts`'s own prose ("add a value to a
+ * collection"). Under the OLD rule this specific case happened to be
+ * unreachable (an append could only ever start from `undefined`, so
+ * "shrink relative to before" had no `before` to shrink FROM) — it is a
+ * gap the reopening WIDENS the reach of, not one it introduces from
+ * nothing, and it is disclosed here rather than silently left for a
+ * future reader to rediscover.
+ *
+ * DELIBERATELY NOT CHECKED, FOR THE SAME REASON `effect-validation.ts`'s
+ * `increment` coherence check deliberately does NOT check the SIGN of an
+ * increment's change (see that file's header): checking "did this kind's
+ * `before`/`after` move in the direction its label implies" is a
+ * DIRECTIONAL/semantic claim about `kind`, not a STRUCTURAL claim about
+ * whether `before` is honest — and this file's Layer 1 has only ever been
+ * the latter. Three concrete reasons a growth check is not added here,
+ * not just one:
+ *
+ *   1. "Growth" has no well-defined generic meaning across `unknown`
+ *      JSON values. It is intuitive for an array (`after.length >
+ *      before.length`?), but `delta.ts` never restricts `append`'s
+ *      payload to arrays specifically — `before`/`after` are `unknown`
+ *      by design (this file's own `deepEqualJson` handles objects and
+ *      primitives too) — so any rule would either silently assume
+ *      "arrays only" (quietly narrowing what `append` is allowed to
+ *      describe, a bigger reopening than this one) or need its own
+ *      per-shape heuristics, which is exactly the kind of judgment call
+ *      Layer 1's honesty check has never made for any other `kind`.
+ *   2. A single delta's local `before`/`after` cannot be judged in
+ *      isolation against "the whole effect's" intent — this file's OWN
+ *      multi-delta example two paragraphs below (`remove` at `"a.b"`
+ *      followed by an `append` recreating `"a.b.c"`) is proof that one
+ *      step's `after` legitimately looking like a regression is
+ *      sometimes exactly what a correct multi-step pipeline produces at
+ *      an intermediate point; `domains/infra/domain.ts`'s own multi-step
+ *      `desiredCount` pipeline (drained then restored, across `"set"`
+ *      deltas) is the same principle for a different `kind`. A rule that
+ *      judges one delta's shape without the surrounding effect would risk
+ *      rejecting exactly the multi-step case ADR 0004's own header already
+ *      treats as legitimate.
+ *   3. Precedent, in this exact file: `effect-validation.ts`'s `increment`
+ *      check enforces "numeric," never "increasing" — `after < before` is
+ *      explicitly, deliberately accepted as "a legitimate decrement" per
+ *      `delta.ts`'s "signed" wording. The same philosophy — verify
+ *      structural honesty and (where `delta.ts` names a real type
+ *      constraint) type coherence, never a `kind`-implied DIRECTION —
+ *      applies here without inventing a new standard just for `append`.
+ *
+ * A future milestone that wants "append never shrinks" as an enforced
+ * property has a real, well-scoped question to answer first — what
+ * counts as growth for a non-array `append` target, and at what
+ * granularity (one delta, or the whole effect) — not a bug to patch
+ * silently into this function.
+ *
  * LAYER 2 — FINAL FINGERPRINT CONSISTENCY. After applying every delta (in
  * order — order matters when two deltas touch related paths, e.g. a
  * `remove` at `"a.b"` followed by an `append` recreating `"a.b.c"`),
