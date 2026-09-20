@@ -34,7 +34,12 @@ import { deleteAtPath, getAtPath, PathResolutionError, setAtPath } from "./path.
  *     an index into a pre-existing array — see `path.ts`'s file header
  *     for the full reasoning). If the path already has a value, that's a
  *     contradiction: something is already there, so this isn't actually
- *     an append.
+ *     an append. THIS ASSUMPTION IS SHARED WITH `path.ts`, NOT UNIQUE TO
+ *     THIS FILE — see that file's own header for the matching
+ *     cross-reference: a future reopening of "no array-index syntax,
+ *     append creates a new leaf" must update `checkClaimedBefore` here
+ *     AND `path.ts`'s primitives together, or the two will silently
+ *     enforce different rules.
  *
  * LAYER 2 — FINAL FINGERPRINT CONSISTENCY. After applying every delta (in
  * order — order matters when two deltas touch related paths, e.g. a

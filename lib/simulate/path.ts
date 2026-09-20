@@ -48,6 +48,20 @@ import type { Json } from "../contracts/index.js";
  * at all. Adding array-index segments would be exactly the kind of
  * "expression language nobody asked for" ADR 0001 already declined to
  * build for `Delta.kind` itself.
+ *
+ * THIS ASSUMPTION IS SHARED WITH `consistency.ts`, NOT UNIQUE TO THIS
+ * FILE — a forward note added after independent verification flagged
+ * that only THIS file's header named it. The "no array-index syntax,
+ * `\"append\"` creates a leaf that did not exist before" assumption is
+ * load-bearing in TWO places: this file's own `setAtPath`/`deleteAtPath`,
+ * AND `consistency.ts`'s Layer-1 `"append"` handling (`checkClaimedBefore`
+ * there treats "the path already has a value" as a contradiction of
+ * `"append"`'s own claimed shape). A future milestone reopening this
+ * assumption — to add array-index paths, or to model a collection as a
+ * single array field appended-to rather than as one new key per item —
+ * must update BOTH files together, or `consistency.ts` will keep
+ * enforcing a rule `path.ts` no longer actually implements. See
+ * `consistency.ts`'s own header for the matching cross-reference.
  */
 
 function splitPath(path: string): readonly string[] {
