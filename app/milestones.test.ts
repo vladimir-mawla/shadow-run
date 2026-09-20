@@ -38,39 +38,12 @@ const DONE_HTML = new URL("../.genesis/DONE.html", import.meta.url);
  * The original version of this parser matched
  * `<span class="pill[^"]*">` anywhere between a row's opening `<td>` and its
  * closing `</tr>`, non-greedily — i.e. "the first pill-ish span in the row."
- * That is wrong on two independent counts, either of which is enough to
- * misread a row:
- *   1. `pill[^"]*` matches by PREFIX, so a class like `pill-shaped-decoy`
- *      (which has nothing to do with the status column) satisfies it.
- *   2. Matching "anywhere in the row" means a decoy span earlier in a
- *      free-text title cell — e.g. M2's own row now has `<span
- *      class="note">` markup in its title — gets matched before the real
- *      status pill even though it isn't in the Status column at all.
- * The table's own header row (`#, Milestone, Phase, Demo command, Loops,
- * Status`) makes the fix obvious: the status pill is always the LAST `<td>`
- * in the row, structurally, regardless of what free-form markup earlier
- * cells contain. So this version (a) splits the row into its actual `<td>`
- * cells and only looks at the last one, and (b) matches the `pill` class as
- * an exact token (`pill` or `pill <status>`), not a prefix, as defense in
- * depth against a decoy class landing in that last cell too. A row whose
- * last cell has no pill at all throws instead of being silently dropped —
- * a guard that can fail open by shrinking its own result set is worse than
- * no guard.
- *
- * A first pass at this fix anchored to the last cell and matched the exact
- * class token, but still used `String.match()` *without* the `g` flag
- * inside that cell — which returns only the FIRST match. That still picks
- * a winner when the last cell contains more than one exact-token pill
- * span, e.g. `<span class="pill fake">wrongstate</span> <span
- * class="pill todo">todo</span>` reads "wrongstate". Not exploitable in
- * today's file (the Status column only ever holds one span) — but that is
- * exactly what was said about title cells before M2's row grew a
- * `<span class="note">`. So this version goes further: it requires the
- * last cell's ENTIRE trimmed content (nothing before or after, only
- * incidental whitespace stripped) to be exactly one pill span, anchored
- * with `^`/`$`. Two pills, a pill plus stray text, or an empty cell all
- * fail the full-string match and throw; only whitespace padding around a
- * single legitimate pill is tolerated.
+ * That let a decoy span earlier in a free-text title cell (e.g. M2's own
+ * `<span class="note">` markup) win over the real status pill. Fixed by
+ * anchoring to the row's LAST `<td>` (the table's own header names it
+ * "Status") and requiring the whole trimmed cell to be exactly one pill
+ * element — see `parsePillCellText` below for what's load-bearing in that
+ * requirement versus what was calibration.
  */
 function pillsInHtml(html: string): { id: string; state: string }[] {
   // Only rows whose FIRST cell is a milestone id are data rows — this is
@@ -92,23 +65,117 @@ function pillsInHtml(html: string): { id: string; state: string }[] {
     }
     // The cell's inner content (between its own <td> and </td>), with only
     // incidental whitespace trimmed — everything else must be exactly one
-    // pill span. This is what makes a second pill, or a pill plus stray
-    // text, fail instead of `.match()` silently picking whichever comes
-    // first in the string.
+    // pill element. This is what makes a second pill, or a pill plus stray
+    // text, fail instead of picking whichever comes first in the string.
     const inner = lastCell.replace(/^<td>/, "").replace(/<\/td>$/, "").trim();
-    // Exact class token match ("pill" or "pill <status>"), not a prefix —
-    // see the function comment for why a prefix match is exploitable — and
-    // anchored to the WHOLE trimmed cell (^...$), not searched for inside
-    // it, so a second pill or trailing text can't hide next to a real one.
-    const pillMatch = inner.match(/^<span class="pill(?: [a-z]+)?">([a-z]+)<\/span>$/);
-    if (!pillMatch) {
-      throw new Error(
-        `DONE.html row for ${id} has a malformed status cell — expected exactly one status ` +
-          `pill and nothing else, got: ${JSON.stringify(inner)}`,
-      );
-    }
-    return { id, state: pillMatch[1]! };
+    const state = parsePillCellText(inner, id);
+    return { id, state };
   });
+}
+
+/**
+ * Parses the trimmed inner content of a status cell — expected to be
+ * EXACTLY ONE well-formed `<span class="pill ...">...</span>` element,
+ * nothing before or after it — and returns its status text. Throws
+ * otherwise.
+ *
+ * This function's restrictions fall into two categories, and mixing them
+ * up is exactly how this guard got tightened past its own job across three
+ * rounds of independent verification. The next person changing this
+ * should know which bucket a given check is in before touching it.
+ *
+ * LOAD-BEARING — relaxing any of these reopens a real bypass:
+ *   - Exactly ONE top-level element must span the WHOLE trimmed cell, with
+ *     nothing else beside it. This is the fix that closed the original
+ *     two-pill bypass (round 2): a naive "search for a pill in this cell"
+ *     lets a second, decoy pill win by regex match order. Implemented
+ *     below by walking `<span>`/`</span>` nesting depth from the outer
+ *     tag, rather than a single greedy regex, specifically so two SIBLING
+ *     spans (nesting depth returns to 0 before the string ends) are
+ *     rejected even though a naive greedy `.*</span>$` would happily
+ *     bridge them into one "match".
+ *   - The class attribute must contain `pill` as an exact, word-bounded
+ *     token, not a prefix — this is what rejects `pill-shaped-decoy`.
+ *   - The extracted status text must be lowercase. This file's own
+ *     convention is all-lowercase status words; a stray capital is a typo
+ *     worth catching, not a shape this parser should shrug at.
+ *   - Malformed markup — an unclosed `<span>`, a self-closing
+ *     `<span class="pill todo" />` used AS the pill itself, sibling
+ *     elements, a duplicated identical pill — all still throw. These are
+ *     genuine breakage, not calibration targets.
+ *
+ * CALIBRATION — relaxed here (round 3) because they rejected ordinary
+ * future edits with no bearing on drift-guard correctness, verified
+ * against this exact file's own conventions:
+ *   - Status text may contain digits and hyphens ("in-progress", "wip2"),
+ *     not just plain letters — `app/milestones.ts` already uses
+ *     "in-progress" as a real `Milestone["status"]` value.
+ *   - The pill's class attribute may carry further tokens after `pill`
+ *     ("pill ok extra") — a cosmetic CSS modifier has no semantic content.
+ *   - The pill span may contain a nested, purely decorative element (e.g.
+ *     an icon span) alongside its text. Handled by extracting the outer
+ *     span's TEXT CONTENT (all nested tags stripped), not by requiring
+ *     bare inner HTML with no children — while still requiring that
+ *     nested markup to close entirely inside the one outer span.
+ *
+ * DELIBERATELY NOT relaxed, left for the next reader to decide: an HTML
+ * comment inside the cell (before, after, or instead of the pill) also
+ * throws here. Independent verification rated that mildly too strict but
+ * low priority. There's no known legitimate reason for a comment in this
+ * specific cell, so it's left strict rather than adding comment-stripping
+ * logic for a case nobody has actually hit — but it would be a reasonable,
+ * narrow follow-up if that ever changes.
+ */
+function parsePillCellText(cellInner: string, rowId: string): string {
+  const fail = (reason: string): never => {
+    throw new Error(
+      `DONE.html row for ${rowId} has a malformed status cell — ${reason}: ${JSON.stringify(cellInner)}`,
+    );
+  };
+
+  const openTagMatch = cellInner.match(/^<span class="pill(?:\s+[a-z0-9-]+)*">/);
+  if (!openTagMatch) {
+    return fail('does not open with a well-formed <span class="pill..."> element');
+  }
+
+  // Walk <span>/</span> nesting depth from just past the outer opening tag,
+  // rather than one greedy regex, so a nested (decorative) span is
+  // tolerated but the outer span's REAL close is found precisely — a
+  // sibling pill after it must not be silently absorbed into the "match".
+  let depth = 1;
+  const tagPattern = /<\/?span\b[^>]*>/g;
+  tagPattern.lastIndex = openTagMatch[0].length;
+  let closeIndex = -1;
+  let afterCloseIndex = -1;
+  let match: RegExpExecArray | null;
+  while ((match = tagPattern.exec(cellInner))) {
+    const tag = match[0];
+    if (tag.startsWith("</")) {
+      depth--;
+      if (depth === 0) {
+        closeIndex = match.index;
+        afterCloseIndex = tagPattern.lastIndex;
+        break;
+      }
+    } else if (tag.endsWith("/>")) {
+      return fail("a self-closing <span/> is not well-formed markup here");
+    } else {
+      depth++;
+    }
+  }
+  if (closeIndex === -1) {
+    return fail("its <span> is never closed");
+  }
+  if (afterCloseIndex !== cellInner.length) {
+    return fail("there is content beside the pill's closing </span> (a sibling element or stray text)");
+  }
+
+  const innerHtml = cellInner.slice(openTagMatch[0].length, closeIndex);
+  const text = innerHtml.replace(/<[^>]*>/g, "").trim();
+  if (!/^[a-z][a-z0-9-]*$/.test(text)) {
+    return fail(`its pill text is not a plain lowercase status word (got ${JSON.stringify(text)})`);
+  }
+  return text;
 }
 
 /** Every (milestone id, pill state) pair in DONE.html's status table. */
@@ -213,6 +280,56 @@ describe("pillsInHtml (the drift guard's own parser)", () => {
   it("attack: a status cell that is only whitespace — throws", () => {
     const html = row("   ");
     expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
+  });
+
+  it("attack: an unclosed <span> — throws", () => {
+    const html = row('<span class="pill todo">todo');
+    expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
+  });
+
+  it("attack: a self-closing pill span — throws", () => {
+    const html = row('<span class="pill todo" />');
+    expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
+  });
+
+  it("attack: two duplicated, identical pills — throws (not silently deduplicated)", () => {
+    const html = row('<span class="pill todo">todo</span><span class="pill todo">todo</span>');
+    expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
+  });
+
+  it("attack: uppercase in the status text — throws (this file's own convention is all-lowercase)", () => {
+    // Class token is valid lowercase ("todo") so this isolates the check to
+    // the extracted TEXT specifically, not the class attribute shape.
+    const html = row('<span class="pill todo">Todo</span>');
+    expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
+  });
+
+  // Independent verification's round 3 found the round-2 fix had swung the
+  // other way: it was now REJECTING ordinary, zero-risk future edits that
+  // have no bearing on the guard's actual job. These cases must keep
+  // working — a relaxation nobody pins in a regression test is a
+  // relaxation the next round of "tighten this" will quietly undo.
+  it("accepts a status word with a hyphen (\"in-progress\" is a real Milestone[\"status\"] value)", () => {
+    const html = row('<span class="pill wip">in-progress</span>');
+    expect(pillsInHtml(html)).toEqual([{ id: "M1", state: "in-progress" }]);
+  });
+
+  it("accepts a status word with a digit (\"wip2\")", () => {
+    const html = row('<span class="pill wip">wip2</span>');
+    expect(pillsInHtml(html)).toEqual([{ id: "M1", state: "wip2" }]);
+  });
+
+  it('accepts extra cosmetic class tokens after "pill" ("pill ok extra")', () => {
+    const html = row('<span class="pill ok extra">done</span>');
+    expect(pillsInHtml(html)).toEqual([{ id: "M1", state: "done" }]);
+  });
+
+  it("accepts a purely decorative nested element inside the pill (e.g. an icon span)", () => {
+    // The nested span carries no text of its own (a real icon is normally
+    // CSS/SVG-driven, not a text node) — the outer span's TEXT CONTENT is
+    // still exactly "todo" once the nested tag is stripped.
+    const html = row('<span class="pill todo"><span class="icon-dot" aria-hidden="true"></span> todo</span>');
+    expect(pillsInHtml(html)).toEqual([{ id: "M1", state: "todo" }]);
   });
 });
 
