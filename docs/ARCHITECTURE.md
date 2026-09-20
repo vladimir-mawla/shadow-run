@@ -126,6 +126,49 @@ function-valued property from isPlainData's reflection-based walk entirely"`.
   resultingFingerprint doesn't match its own claimed deltas is rejected"`, `"GATE 4 (inconsistent-effect): an
   adapter whose delta lies about the world's starting value is rejected even though its final hash is
   'consistent' with ITS OWN lie"`.
+- **Refuses to let an `append` claim growth it does not actually deliver, once `before` is a real array.**
+  When `delta.kind === "append"` and `delta.before` is a defined array, `delta.after` must be an array with
+  at least as many elements — a non-array `after` counts as the most extreme shrink, not an exemption.
+  *Tests:* `consistency.test.ts` — `"ENFORCED (independent verification, MEDIUM finding, round 2 — the
+  narrow growth check): an 'append' whose 'after' SHRINKS an existing array 'before' is now rejected, not
+  silently passed"`, `"ENFORCED sanity: an 'append' whose 'after' is not even an array, while 'before' was
+  one, is rejected the same way (treated as the most extreme shrink)"`. **Narrowed, not closed — the
+  distinction matters and this file does not blur it:** a same-length-or-longer but *unrelated* replacement
+  (`{before: ["a","b"], after: ["x","y","z"]}`) still passes, because this check enforces a length floor, not
+  "`after` is really an extension of `before`"; and a non-array `append` target (an object-valued collection)
+  is outside this check's scope entirely, by the same "defined array" precondition. Both residues are named,
+  not hidden. *Tests:* `consistency.test.ts` — `"DISCLOSED GAP (independent verification, MEDIUM finding),
+  PINNED NOT FIXED — narrower than before: a SAME-LENGTH-OR-LONGER but UNRELATED replacement of an existing
+  array still passes..."`, `"DISCLOSED GAP: a non-array 'append' target (an object-valued collection) is
+  outside the growth check's scope entirely..."`.
+- **Refuses to scan a file it cannot honestly parse.** The separate architectural invariant that
+  `lib/simulate/**` never reaches an LLM, the network, or a Node built-in (`lib/simulate/__tests__
+  /architecture.test.ts`) parses every file with the real TypeScript compiler (via `typescript/unstable/sync`
+  — this repo's installed `typescript@7.0.2` is the native/Go-backed compiler, whose main entry exports only
+  `{version}`, so the classic `ts.createSourceFile` API this kind of guard traditionally uses does not exist
+  here) and calls `project.program.getSyntacticDiagnostics(file)` *before* any AST walk. Any diagnostic throws
+  `UnparseableFileError`, surfaced in its own `parseOffenders` list, kept separate from the specifier/fetch
+  offender lists on purpose — "this file could not be checked" and "this file was checked and failed" are
+  different findings. A re-export (`export {x} from "..."`, `export * from "..."`) is scanned identically to
+  an import.
+  *Tests:* `architecture.test.ts` — `"every non-test source file under lib/simulate/** parses as valid
+  TypeScript — a file this guard cannot parse is an automatic offender, never silently treated as clean
+  (round 5)"`; the `"EXPLOIT REGRESSION (independent verification, round 5)"` block's `"[HIGH] an unterminated
+  template literal (a syntax error) fails closed instead of silently swallowing a real fetch(...) call"` and
+  `"[HIGH] a broken function signature (a syntax error) also fails closed"`; `"[MEDIUM] a re-export (\`export
+  ... from\` / \`export * from\`) was never checked for its specifier — closed alongside the specifier
+  extraction rewrite"`. The identical rewrite exists for `domains/**`'s own `await`-ban guard
+  (`domains/__tests__/architecture.test.ts`), copied rather than re-derived.
+
+**Named limit, stated honestly rather than flattened into the fix above:** `getSyntacticDiagnostics` is not
+the complete word on ECMAScript validity. Verified directly in this session (a throwaway script against the
+real, installed `typescript` package): a top-level `return`, a `yield` outside a generator, and a `for
+await` outside an `async` function all produce **zero** syntactic diagnostics — TypeScript classifies each as
+a *semantic* error, not a syntactic one. In every one of those three shapes, checked directly, the parse tree
+stays structurally intact and a `fetch(...)` call placed inside it is still found by the AST walk exactly as
+it would be in valid code — so this does not matter for this guard's actual job (finding a forbidden call),
+but it is a real, disclosed gap in the stronger-sounding claim "this file parses as valid TypeScript," not
+something to leave unstated.
 
 **Named limit, stated at full strength:** purity is *detected*, not *prevented*. `simulate()`'s own body
 contributes no non-determinism, but nothing in `adapter.project`'s type signature stops its body from calling
