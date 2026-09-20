@@ -5,6 +5,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import {
   isAwaitExpression,
   isCallExpression,
+  isExportDeclaration,
   isExternalModuleReference,
   isIdentifier,
   isImportDeclaration,
@@ -98,17 +99,48 @@ import { API, type Project } from "typescript/unstable/sync";
  *     for the full argument for why the fix is deleting the tokenizer,
  *     not patching it a fourth time — not re-argued here.
  *
- * THE FIX: DELETE THE TOKENIZER. `tokenize`/`scanCode`/`scanTemplateBody`
- * are gone. This file now parses every file/snippet it inspects with the
- * REAL TypeScript compiler, identically to `lib/simulate/__tests__
- * /architecture.test.ts`'s own fix — `typescript/unstable/sync`'s `API`/
- * `Project`/`Program`, walked with `Node#forEachChild`. `analyzeFile`/
- * `analyzeSource` (below) replace `tokenize`; every existing test's
- * assertions are unchanged — only the mechanism changed, from text
- * scanning to compiling.
+ * THE FIX (ROUND 4): DELETE THE TOKENIZER. `tokenize`/`scanCode`/
+ * `scanTemplateBody` are gone. This file parses every file/snippet it
+ * inspects with the REAL TypeScript compiler, identically to
+ * `lib/simulate/__tests__/architecture.test.ts`'s own fix —
+ * `typescript/unstable/sync`'s `API`/`Project`/`Program`, walked with
+ * `Node#forEachChild`. `analyzeFile`/`analyzeSource` (below) replace
+ * `tokenize`.
+ *
+ * ROUND 4's OWN HEADER, AT THE TIME, CLAIMED THIS CLOSED THE BUG CLASS.
+ * INDEPENDENT VERIFICATION FOUND THAT CLAIM FALSE, IDENTICALLY IN THIS
+ * FILE AS WELL AS `lib/simulate`'s — THE CLASS HAD MOVED, NOT CLOSED:
+ *
+ *     const x = `unterminated
+ *     async function f() { await g(); }        →  awaits: []
+ *
+ *     function broken( {
+ *     async function f() { await g(); }        →  awaits: []
+ *
+ * Both are SYNTAX ERRORS. The real compiler's parser does not throw on
+ * them — it does error RECOVERY, and recovery can absorb the following,
+ * perfectly valid `await` into the wrong node or drop it from the tree
+ * entirely. Zero findings, no exception, the suite green — the exact
+ * same "a broken file looks identical to a clean one" failure the
+ * hand-rolled tokenizer had, moved from the LEXER to the COMPILER'S
+ * ERROR RECOVERY, one layer down. See `lib/simulate/__tests__
+ * /architecture.test.ts`'s header for the full argument — not re-argued
+ * here — for why deleting a scanner does not delete the PROPERTY "this
+ * tool can be fed input it silently mishandles," only moves where that
+ * property's remaining instances live.
+ *
+ * THE FIX (ROUND 5): FAIL CLOSED ON DIAGNOSTICS, identically to
+ * `lib/simulate`'s own round-5 fix. `analyzeFile` now calls
+ * `project.program.getSyntacticDiagnostics(file)` BEFORE walking the AST
+ * at all: any syntactic diagnostic throws `UnparseableFileError`
+ * (`analyzeSource`'s synthetic callers see the throw directly; `scan()`'s
+ * real-file walk catches it per file and reports a `parseOffender`, a
+ * list distinct from `specifierOffenders`/`awaitOffenders`, checked by
+ * its own dedicated test below).
  *
  * WHAT COUNTS AS "A SPECIFIER" NOW: identical rule to `lib/simulate`'s
  * file — see that file's header for the precise cases (`ImportDeclaration`,
+ * `ExportDeclaration.moduleSpecifier` — ADDED IN ROUND 5, see below —
  * `ImportEqualsDeclaration`'s `ExternalModuleReference`, a dynamic
  * `import(...)` call via `isImportExpression`, a `require(...)` call), a
  * literal string/no-substitution-template argument recorded as-is, and a
@@ -117,30 +149,45 @@ import { API, type Project } from "typescript/unstable/sync";
  * disclosed "dynamically computed specifier" gap this file's `lib/
  * simulate` sibling closes.
  *
+ * FIX (ROUND 5, SECOND FINDING), identically to `lib/simulate`'s own:
+ * `export ... from "x"` and `export * from "x"` produced ZERO specifier
+ * offenders under rounds 1–4 — `visit` never checked
+ * `ExportDeclaration.moduleSpecifier`, structurally identical to
+ * `ImportDeclaration.moduleSpecifier` and needing no changes to
+ * `recordSpecifier` to accept. Closed by one added branch.
+ *
  * WHAT COUNTS AS "A BARE `await`" NOW: an `AwaitExpression` node found
  * ANYWHERE in the AST — the direct, structural replacement for the old
  * `BARE_AWAIT_TAIL` regex, with the IDENTICAL scope (still blanket, still
  * not top-level-only — see "WHY BAN `await` OUTRIGHT" below for why that
  * choice is kept, not just inherited by omission).
  *
- * WHAT IS AND ISN'T CAUGHT NOW, STATED PLAINLY (see the "false-positive
- * discipline"/regression blocks below for the direct proof of each
- * claim):
- *   - CAUGHT: every case the old tokenizer's rounds 1–3 caught (`await`
- *     hidden inside a `${...}` interpolation at any nesting depth), PLUS
- *     the round-4 regex-literal bypass (a real parser never confuses a
- *     regex literal for a template literal), PLUS a dynamically-computed
- *     import specifier (previously undetectable, now flagged).
- *   - STILL NOT CAUGHT, BY DESIGN, NOT OVERSIGHT: any asynchrony that
- *     never spells the literal keyword `await` at all — a raw
- *     `.then(...)` chain, a generator-based coroutine, or a `Promise`
- *     used without ever awaiting it — and a keyword typed out only
- *     inside an ORDINARY string or comment meant for `eval` later.
+ * WHAT IS AND ISN'T CAUGHT NOW, STATED PLAINLY, VALID AND INVALID INPUT
+ * KEPT DELIBERATELY SEPARATE — NOT "no blind spots," THE SAME OVERCLAIM
+ * ROUND 4 MADE (see the "false-positive discipline"/"fails closed"
+ * regression blocks below for the direct proof of each claim):
+ *   - FOR SYNTACTICALLY VALID INPUT: every case the old tokenizer's
+ *     rounds 1–3 caught (`await` hidden inside a `${...}` interpolation
+ *     at any nesting depth), PLUS the round-4 regex-literal bypass (a
+ *     real parser never confuses a regex literal for a template
+ *     literal), PLUS a dynamically-computed import specifier and a
+ *     re-export's specifier (both previously undetectable, both now
+ *     flagged) — a valid file has no remaining lexical/syntactic blind
+ *     spot in this file's scope.
+ *   - FOR SYNTACTICALLY INVALID INPUT: rejected outright as an automatic
+ *     offender (round 5) — never scanned as if it were clean. A
+ *     different guarantee from the one above, not a stronger version of
+ *     it.
+ *   - STILL NOT CAUGHT, ON VALID INPUT, BY DESIGN, NOT OVERSIGHT: any
+ *     asynchrony that never spells the literal keyword `await` at all —
+ *     a raw `.then(...)` chain, a generator-based coroutine, or a
+ *     `Promise` used without ever awaiting it — and a keyword typed out
+ *     only inside an ORDINARY string or comment meant for `eval` later.
  *     Strings and comments stay deliberately opaque as DATA; a real
  *     parser does not execute or re-interpret their contents. These are
- *     semantic gaps (the code never spells the forbidden keyword as code
- *     at all), not lexical ones — a real parser has no lexical/syntactic
- *     blind spots left for this file's scope.
+ *     SEMANTIC gaps (the code never spells the forbidden keyword as code
+ *     at all, even once correctly parsed) — a genuinely different
+ *     category from the LEXICAL/SYNTACTIC ones rounds 1–5 were about.
  *
  * WHY BAN `await` OUTRIGHT, NOT JUST AT TOP LEVEL — KEPT DELIBERATELY,
  * NOW THAT A TOP-LEVEL-ONLY CHECK IS ACTUALLY EASY: with a real AST, "is
@@ -200,6 +247,26 @@ interface FoundAwait {
 }
 
 /**
+ * Thrown by `analyzeFile` the moment the real compiler reports ANY
+ * syntactic diagnostic for a file — see the file header's "THE FIX
+ * (ROUND 5)" paragraph and `lib/simulate/__tests__/architecture.test.ts`'s
+ * identical class for the full argument (error recovery, not a thrown
+ * exception, is how a real parser normally handles broken input, and
+ * recovery can absorb a valid statement following a syntax error into
+ * the wrong place in the tree, or drop it, so a broken file can walk
+ * clean with zero findings).
+ */
+class UnparseableFileError extends Error {
+  constructor(file: string, diagnosticMessages: readonly string[]) {
+    super(
+      `could not parse ${file} as valid TypeScript — refusing to scan it as if it were clean ` +
+        `(${diagnosticMessages.length} syntax diagnostic(s)): ${diagnosticMessages.join("; ")}`,
+    );
+    this.name = "UnparseableFileError";
+  }
+}
+
+/**
  * ONE `API` instance for this whole file — see `lib/simulate/__tests__
  * /architecture.test.ts`'s identical setup for why (spawning the real
  * compiler's backing process once, in `beforeAll`, rather than per
@@ -218,6 +285,11 @@ afterAll(() => {
  * things this file cares about — see the file header's "WHAT COUNTS AS"
  * paragraphs. `file` must already exist on disk; callers that only have
  * source TEXT use `analyzeSource` below.
+ *
+ * FAILS CLOSED ON SYNTAX ERRORS (round 5, see file header): checks
+ * `getSyntacticDiagnostics` before any AST walk, throwing
+ * `UnparseableFileError` rather than walking a tree error recovery may
+ * have silently reshaped.
  */
 function analyzeFile(file: string): { specifiers: readonly FoundSpecifier[]; awaits: readonly FoundAwait[] } {
   const snapshot = api.updateSnapshot({ openFiles: [file] });
@@ -225,6 +297,12 @@ function analyzeFile(file: string): { specifiers: readonly FoundSpecifier[]; awa
   const sf: SourceFile | undefined = project?.program.getSourceFile(file);
   if (!project || !sf) {
     throw new Error(`analyzeFile: the real compiler could not load/parse ${file}`);
+  }
+
+  const diagnostics = project.program.getSyntacticDiagnostics(file);
+  if (diagnostics.length > 0) {
+    api.updateSnapshot({ closeFiles: [file] });
+    throw new UnparseableFileError(file, diagnostics.map((d) => d.text));
   }
 
   const specifiers: FoundSpecifier[] = [];
@@ -249,6 +327,12 @@ function analyzeFile(file: string): { specifiers: readonly FoundSpecifier[]; awa
     if (isAwaitExpression(node)) {
       awaits.push({ line: lineOf(node) });
     } else if (isImportDeclaration(node)) {
+      recordSpecifier(node.moduleSpecifier);
+    } else if (isExportDeclaration(node)) {
+      // `export { x } from "y"` and `export * from "y"` — see file
+      // header's "FIX (ROUND 5, SECOND FINDING)". `moduleSpecifier` is
+      // `undefined` for a plain `export { x }` with no `from` clause;
+      // `recordSpecifier` already no-ops on `undefined`.
       recordSpecifier(node.moduleSpecifier);
     } else if (isImportEqualsDeclaration(node) && isExternalModuleReference(node.moduleReference)) {
       recordSpecifier(node.moduleReference.expression);
@@ -320,21 +404,37 @@ interface AwaitOffender {
   readonly line: number;
 }
 
-function scan(): { specifierOffenders: SpecifierOffender[]; awaitOffenders: AwaitOffender[] } {
+/** A real, on-disk file this guard refused to scan because the compiler could not parse it as valid TypeScript — see `UnparseableFileError`. Kept as its own list, distinct from `specifierOffenders`/`awaitOffenders`: "could not be checked" and "was checked and failed" are different findings. */
+interface ParseOffender {
+  readonly file: string;
+  readonly message: string;
+}
+
+function scan(): { specifierOffenders: SpecifierOffender[]; awaitOffenders: AwaitOffender[]; parseOffenders: ParseOffender[] } {
   const specifierOffenders: SpecifierOffender[] = [];
   const awaitOffenders: AwaitOffender[] = [];
+  const parseOffenders: ParseOffender[] = [];
   for (const file of listNonTestSourceFiles(DOMAINS_ROOT)) {
-    const { specifiers, awaits } = analyzeFile(file);
-    for (const { specifier, line } of specifiers) {
+    let result: { specifiers: readonly FoundSpecifier[]; awaits: readonly FoundAwait[] };
+    try {
+      result = analyzeFile(file);
+    } catch (error) {
+      if (error instanceof UnparseableFileError) {
+        parseOffenders.push({ file: relative(REPO_ROOT, file), message: error.message });
+        continue;
+      }
+      throw error;
+    }
+    for (const { specifier, line } of result.specifiers) {
       if (!resolvesInsideAllowedRoots(file, specifier)) {
         specifierOffenders.push({ file: relative(REPO_ROOT, file), line, specifier });
       }
     }
-    for (const { line } of awaits) {
+    for (const { line } of result.awaits) {
       awaitOffenders.push({ file: relative(REPO_ROOT, file), line });
     }
   }
-  return { specifierOffenders, awaitOffenders };
+  return { specifierOffenders, awaitOffenders, parseOffenders };
 }
 
 describe("domains/** never reaches an LLM, the network, or a Node built-in, and never contains `await`", () => {
@@ -361,6 +461,18 @@ describe("domains/** never reaches an LLM, the network, or a Node built-in, and 
       );
     }
     expect(awaitOffenders).toEqual([]);
+  });
+
+  it("every non-test source file under domains/** parses as valid TypeScript — a file this guard cannot parse is an automatic offender, never silently treated as clean (round 5)", () => {
+    const { parseOffenders } = scan();
+    if (parseOffenders.length > 0) {
+      const report = parseOffenders.map((o) => `${o.file}: ${o.message}`).join("\n");
+      throw new Error(
+        `domains/** contains ${parseOffenders.length} file(s) this guard could not parse as valid TypeScript — ` +
+          `refusing to treat unparseable source as clean:\n${report}`,
+      );
+    }
+    expect(parseOffenders).toEqual([]);
   });
 
   describe("false-positive discipline — this test does not flag its own sanity-test strings", () => {
@@ -476,6 +588,41 @@ describe("domains/** never reaches an LLM, the network, or a Node built-in, and 
     it("an ordinary regex literal used for real string matching, with no backtick inside it, parses and scans normally", () => {
       const source = ["const isDigits = /^[0-9]+$/;", "async function f() { await g(); }", ""].join("\n");
       expect(analyzeSource(source).awaits).toEqual([{ line: 2 }]);
+    });
+  });
+
+  describe("EXPLOIT REGRESSION (independent verification, round 5): syntax errors defeated the real parser's error recovery the same way earlier rounds defeated the tokenizer — the bug class MOVED, not closed, until diagnostics are checked", () => {
+    it("[HIGH] an unterminated template literal (a syntax error) fails closed instead of silently swallowing a real await", () => {
+      const exploit = ["const x = `unterminated", "async function f() { await g(); }", ""].join("\n");
+      expect(() => analyzeSource(exploit)).toThrow(UnparseableFileError);
+      expect(() => analyzeSource(exploit)).toThrow(/could not parse/);
+    });
+
+    it("[HIGH] a broken function signature (a syntax error) also fails closed", () => {
+      const exploit = ["function broken( {", "async function f() { await g(); }", ""].join("\n");
+      expect(() => analyzeSource(exploit)).toThrow(UnparseableFileError);
+      expect(() => analyzeSource(exploit)).toThrow(/could not parse/);
+    });
+
+    it("does NOT overtighten: the equivalent CLEAN input (no syntax error) still scans normally, proving the fail-closed path is triggered by the diagnostic, not by the shape of the snippet", () => {
+      const control = ["const x = 1;", "async function f() { await g(); }", ""].join("\n");
+      expect(analyzeSource(control).awaits).toEqual([{ line: 2 }]);
+    });
+
+    it("[MEDIUM] a re-export (`export ... from` / `export * from`) was never checked for its specifier — closed alongside the specifier extraction rewrite", () => {
+      expect(analyzeSource('export { helper } from "openai";').specifiers).toEqual([{ specifier: "openai", line: 1 }]);
+      expect(analyzeSource('export * from "openai";').specifiers).toEqual([{ specifier: "openai", line: 1 }]);
+    });
+
+    it("does NOT overtighten: a re-export with no `from` clause at all (`export { helper };`) has no specifier to find, and is not flagged", () => {
+      expect(analyzeSource("const helper = 1;\nexport { helper };\n").specifiers).toEqual([]);
+    });
+
+    it("does NOT overtighten: a legitimate relative re-export is still accepted, not merely un-flagged", () => {
+      const fromFile = join(DOMAINS_ROOT, "calendar", "domain.ts");
+      const result = analyzeSource('export { netDeltas } from "../shared/net.js";');
+      expect(result.specifiers).toEqual([{ specifier: "../shared/net.js", line: 1 }]);
+      expect(resolvesInsideAllowedRoots(fromFile, "../shared/net.js")).toBe(true);
     });
   });
 });
