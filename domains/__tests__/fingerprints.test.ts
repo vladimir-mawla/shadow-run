@@ -94,6 +94,24 @@ describe("m6-domain-cases.md's quoted World.data fingerprints, verified against 
     expect(afterEverything.fingerprint).toBe("45a9011f");
   });
 
+  it("INV-3's proposed (never-executed-by-the-demo) rollback is nonetheless genuinely correct: restoring it undoes only THIS action's own contribution, never the concurrent write-off it has no jurisdiction over", () => {
+    const { world: afterReservation, observedDeltas } = inventoryInv3.adapter.applyReal(inventoryInv3.action, inventoryInv3.initialWorld);
+    const afterEverything = applyDeltas(afterReservation, [inv3UnrelatedConcurrentDelta]);
+    const rollback = inventoryInv3.adapter.proposeRollback(observedDeltas, inventoryInv3.initialWorld);
+    if (rollback.kind !== "runnable") throw new Error("expected INV-3's rollback to be runnable");
+    const restored = applyDeltas(afterEverything, rollback.steps);
+    // Every field this action touched is back to its exact pre-write value...
+    expect(restored.data.stock.reserved).toBe(inventoryInv3.initialWorld.data.stock.reserved);
+    expect(restored.data.stock.available).toBe(inventoryInv3.initialWorld.data.stock.available);
+    expect(restored.data.reservations).toEqual(inventoryInv3.initialWorld.data.reservations);
+    // ...but stock.damaged is left exactly as the concurrent, unrelated writer set it (4), never
+    // touched by this rollback at all — proving Rollback restores "this action's own write," never
+    // erases a real, legitimate concurrent actor's write it has no jurisdiction over (ADR 0004,
+    // Decision 5, applied here to a domain that never even claims the path in the first place).
+    expect(restored.data.stock.damaged).toBe(4);
+    expect(restored.fingerprint).not.toBe(inventoryInv3.initialWorld.fingerprint); // differs BY EXACTLY that one untouched field.
+  });
+
   it("N1 input World — design doc claims d77e086e", () => {
     expect(notificationN1.initialWorld.fingerprint).toBe("d77e086e");
   });
