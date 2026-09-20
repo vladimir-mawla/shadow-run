@@ -3,17 +3,28 @@ import type { Delta } from "./delta.js";
 /**
  * `AssumptionKind` — a CLOSED, ENGINE-DEFINED enum, never a domain-
  * extensible string and never free text. This is the plan's single
- * hardest constraint on this type (§A.5): "no field may exist where a
- * model's prose could sit without a type error," and `assumptions` is the
- * one field on `ProjectedEffect` that most tempts a future author to widen
- * it to `string` "just this once" (e.g. "assume the customer doesn't
- * cancel in the next 5 minutes") — exactly the crack a narrated guess would
- * slip through. Keeping it a closed union means every assumption a
- * `project()` implementation can ever declare is one this file already
- * named and the engine already understands the shape of; a domain cannot
- * invent a new one without editing this file, which makes the enum's
- * membership something a reviewer can read in one place, not something
- * scattered across every domain that happens to call `project()`.
+ * hardest constraint on THIS TYPE (§A.5): "no field on `ProjectedEffect`
+ * may exist where a model's prose could sit without a type error," and
+ * `assumptions` is the one field on `ProjectedEffect` that most tempts a
+ * future author to widen it to `string` "just this once" (e.g. "assume the
+ * customer doesn't cancel in the next 5 minutes") — exactly the crack a
+ * narrated guess would slip through. Keeping it a closed union means every
+ * assumption a `project()` implementation can ever declare is one this
+ * file already named and the engine already understands the shape of; a
+ * domain cannot invent a new one without editing this file, which makes
+ * the enum's membership something a reviewer can read in one place, not
+ * something scattered across every domain that happens to call
+ * `project()`.
+ *
+ * SCOPE OF THIS CLAIM, STATED EXPLICITLY: it is true of `ProjectedEffect`
+ * and false if read as a claim about `lib/contracts/**` as a whole.
+ * `World.domain` (world.ts), `Delta.path` (delta.ts),
+ * `Rollback.unavailable.reason` (rollback.ts), and
+ * `SimulatorTrust.actionType` (simulator-trust.ts) are all plain, open
+ * `string` fields, by design — see each file's own comment for why leaving
+ * them open is the right call at M1. `ProjectedEffect` is the one type
+ * this project is specifically committed to keeping narration-proof; nothing
+ * else in this directory makes or needs that promise.
  *
  * The three members are exactly the preconditions a *shadow* execution
  * (plan §A.1 — running the same effect logic against a cloned `World`)

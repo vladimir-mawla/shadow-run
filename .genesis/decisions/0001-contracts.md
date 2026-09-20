@@ -213,6 +213,29 @@ happened in the real world. Both variants of `Rollback` are therefore proven, no
   `World.data`) must reintroduce the parameter then, touching a frozen file — an explicit, deferred cost
   accepted now rather than carrying an unused parameter (and the compile error it causes) through eight
   milestones on the chance it's needed later.
+- Forward note for M5, recorded now rather than rediscovered then: `computeFingerprint` (fingerprint.ts) is a
+  32-bit FNV-1a — a change detector, not a signature, and its own file header already says so plainly; this
+  is not being revisited or widened here. What changes at M5 is the STAKES, not the hash: M5's rollback
+  engine (plan §A.4) makes `fingerprint` equality the actual proof mechanism for "did rollback really restore
+  the exact prior state," not merely a cheap drift check. A 32-bit hash's birthday bound is real at that
+  point, not theoretical — collisions become roughly as likely as not once around 2^16 · sqrt(π/2) ≈ 77,000
+  distinct values have been hashed and compared against each other, well within reach of a long-running or
+  heavily-exercised demo. M5 should either (a) state explicitly the sample-count ceiling under which it is
+  relying on 32-bit hash equality as proof, and accept the risk above that ceiling by name, or (b) widen
+  `computeFingerprint`'s output at that point, when the claim built on top of it actually needs the stronger
+  guarantee. This is deliberately not M1's decision to make — `fingerprint.ts` stays exactly as it is for this
+  milestone — but M5 should inherit this question from this ADR, not rediscover it independently the way an
+  L4 verifier would otherwise have to point it out twice.
+- Forward note for M3, recorded for the same reason: `makeWorld` (world.ts) already contains a reusable
+  `deepFreezeClone` helper — deep-clones a `Json` value and freezes every object/array in the clone,
+  DAG-safe (a value shared via two paths is cloned and frozen once, not twice), used because `Object.freeze`
+  is shallow and this project's own "same input, same fingerprint, always" premise depends on `World.data`
+  actually being immutable after construction, not just typed `readonly`. Plan §A.1 already documents that
+  `simulate()` needs to deep-freeze its input `World` and assert that a mutation attempt throws rather than
+  silently succeeding (M3's own success criteria). M3 should import and call `deepFreezeClone` from
+  `lib/contracts` for that, not write a second deep-freeze walk — the DAG-safety and freeze-after-validation
+  ordering it got right here are exactly the details a second, independent implementation would be likely to
+  get wrong the first time. This is a note for M3 to act on then, not a reason to touch `lib/simulate/**` now.
 
 ## Alternatives rejected (summary, cross-referenced above)
 

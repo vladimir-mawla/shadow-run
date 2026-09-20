@@ -3,11 +3,17 @@ import type { AssumptionKind, ProjectedEffect } from "../projected-effect.js";
 
 /**
  * M1 success criterion (plan §C, M1): "`ProjectedEffect.assumptions` is
- * `ReadonlyArray<AssumptionKind>`, a closed enum — not free text. ... no
- * field may exist where a model's prose could sit without a type error."
- * This file proves both halves of that: `assumptions` rejects a value
- * outside the closed set, and `producedBy` — the OTHER field a narrated
- * guess could try to occupy — rejects anything but its one literal value.
+ * `ReadonlyArray<AssumptionKind>`, a closed enum — not free text. No field
+ * on `ProjectedEffect` may exist where a model's prose could sit without a
+ * type error." Scoped deliberately to `ProjectedEffect` — other types in
+ * `lib/contracts/**` (`World.domain`, `Delta.path`,
+ * `Rollback.unavailable.reason`, `SimulatorTrust.actionType`) have
+ * deliberately open `string` fields; see projected-effect.ts's own header
+ * for why `ProjectedEffect` specifically is held to this narrower,
+ * stronger standard. This file proves both halves of the `ProjectedEffect`
+ * claim: `assumptions` rejects a value outside the closed set, and
+ * `producedBy` — the OTHER field a narrated guess could try to occupy —
+ * rejects anything but its one literal value.
  */
 
 const VALID_EFFECT: ProjectedEffect = {
