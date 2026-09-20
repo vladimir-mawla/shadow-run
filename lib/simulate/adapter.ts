@@ -27,13 +27,30 @@ import type { Action } from "./action.js";
  * `project()` that tried to synchronously return a value depending on a
  * network response would have nothing to `await` and no legal way to
  * block for it — it isn't merely discouraged, it doesn't fit the shape.
- * STATED HONESTLY: this does not make an async LLM call IMPOSSIBLE in
- * absolute terms (a sufficiently determined implementation could spin up
- * a blocking synchronous IPC/worker bridge), but it forecloses every
- * ORDINARY path, which is the same "structural, not by promise" standard
- * the plan holds the grep test to — see `simulate.ts`'s own header for the
- * matching honesty about what CAN and cannot be structurally guaranteed
- * for purity.
+ *
+ * A KNOWN, ORDINARY EXCEPTION, NAMED PLAINLY (tightened after independent
+ * verification — the earlier wording here undersold this as needing "a
+ * sufficiently determined implementation," which is not what this is):
+ * ESM top-level `await`, run once at MODULE INITIALIZATION time, before
+ * `project()` is even called. An adapter's module can `await` a real
+ * network/LLM call at the top level; by the time `project()` runs, that
+ * value is already an ordinary, already-resolved, in-memory constant —
+ * `project()` itself is genuinely synchronous by every measure this
+ * function's own signature or `simulate()` can check, and confirmed to
+ * pass `simulate()` cleanly (`ok: true`, returning the prefetched value)
+ * end to end. This is not a contrived attack: it is the single most
+ * idiomatic way to prefetch something in modern Node ESM — no `deasync`,
+ * no worker-thread bridge, no blocking IPC hack required. Nor can M3's
+ * grep-based architectural test help here even in principle: that test's
+ * frozen boundary is `lib/simulate/**` (this file included), but a real
+ * domain adapter's own module lives in `domains/**` (M6's directory,
+ * outside this milestone's scan and outside its freeze boundary
+ * entirely) — there is no file for the grep test to have read. Recorded
+ * here as a genuine, unresolved gap for M6 to inherit, not something
+ * this milestone's synchronous-signature choice actually closes; see
+ * `simulate.ts`'s own header for the matching honesty about what CAN and
+ * cannot be structurally guaranteed for purity, which has the identical
+ * shape of caveat.
  *
  * CHOICE 2 — `project` NEVER RECEIVES THE REAL, LIVE `World`: `simulate()`
  * (simulate.ts) hands it a freshly `deepFreezeClone`d copy nobody else
