@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import {
   isCallExpression,
+  isExportDeclaration,
   isExternalModuleReference,
   isIdentifier,
   isImportDeclaration,
@@ -130,24 +131,71 @@ import { API, type Project } from "typescript/unstable/sync";
  *     lesson: a hand-rolled scanner's gaps are open-ended, and finding
  *     one more of them is not evidence the scanner is now complete.
  *
- * THE FIX: DELETE THE TOKENIZER. `tokenize`/`scanCode`/`scanTemplateBody`
- * are gone. This file now parses every file/snippet it inspects with the
- * REAL TypeScript compiler — `typescript` is already this repo's own
- * devDependency, used for `npm run typecheck` — via `typescript/unstable
- * /sync`'s `API`/`Project`/`Program`, and walks the resulting AST with
- * `Node#forEachChild` (a real method on every node this API returns, not
- * a hand-rolled traversal). `analyzeFile`/`analyzeSource` (below) replace
- * `tokenize`; every existing test's assertions are unchanged — only the
- * mechanism producing `{ specifiers, bareFetchCalls }` changed, from text
- * scanning to compiling. A real parser has no regex-vs-template ambiguity
- * (or any of the other string/comment/nesting ambiguities the tokenizer
- * kept needing new rounds for) because it is the SAME PARSER the language
- * itself is defined by, not an approximation of it.
+ * THE FIX (ROUND 4): DELETE THE TOKENIZER. `tokenize`/`scanCode`/
+ * `scanTemplateBody` are gone. This file parses every file/snippet it
+ * inspects with the REAL TypeScript compiler — `typescript` is already
+ * this repo's own devDependency, used for `npm run typecheck` — via
+ * `typescript/unstable/sync`'s `API`/`Project`/`Program`, and walks the
+ * resulting AST with `Node#forEachChild` (a real method on every node
+ * this API returns, not a hand-rolled traversal). `analyzeFile`/
+ * `analyzeSource` (below) replace `tokenize`.
+ *
+ * ROUND 4's OWN HEADER, AT THE TIME, CLAIMED THIS CLOSED THE BUG CLASS
+ * ("a real parser has no lexical/syntactic blind spots left for this
+ * file's scope"). INDEPENDENT VERIFICATION FOUND THAT CLAIM FALSE, NOT
+ * MERELY INCOMPLETE — the class had MOVED, not closed:
+ *
+ *     const x = `unterminated
+ *     fetch("https://evil.example");        →  bareFetchCalls: []
+ *
+ *     function broken( {
+ *     fetch("https://evil.example");        →  bareFetchCalls: []
+ *
+ * Both are SYNTAX ERRORS. The real compiler's PARSER does not throw on
+ * them — it does error RECOVERY, the same thing every production parser
+ * does for a broken file (so one typo doesn't blank out an entire
+ * editor's syntax highlighting) — and recovery can absorb the following,
+ * PERFECTLY VALID `fetch(...)` call into the wrong node, or drop it from
+ * the tree the walk actually sees. Zero findings, no exception thrown,
+ * the test suite green. This is the EXACT SAME "a broken file looks
+ * identical to a clean one" failure the hand-rolled tokenizer had
+ * (rounds 1–4, in various shapes) — it did not go away when the
+ * tokenizer was deleted, it moved from the LEXER to the COMPILER'S ERROR
+ * RECOVERY, one layer down. Deleting a scanner does not delete the
+ * PROPERTY "this tool can be fed input it silently mishandles" — it only
+ * moves where that property's remaining instances live.
+ *
+ * THE FIX (ROUND 5): FAIL CLOSED ON DIAGNOSTICS.
+ * `project.program.getSyntacticDiagnostics(file)` returns nonzero for
+ * BOTH reproductions above and `0` for equivalent clean input — checked
+ * directly, not assumed. `analyzeFile` (below) now calls this BEFORE
+ * walking the AST at all: if a file has ANY syntactic diagnostic, this
+ * throws `UnparseableFileError` naming the file and the diagnostic
+ * text(s), and the analysis never runs. A file this guard cannot parse
+ * as valid TypeScript is now an automatic offender — never silently
+ * treated as clean — for `analyzeSource`'s synthetic callers (the throw
+ * propagates directly) and for `scan()`'s real-file walk (caught per
+ * file and reported as a `parseOffender`, checked by its own dedicated
+ * test below, distinct from the specifier/fetch offender lists).
+ *
+ * THE HONEST SCOPE OF THIS FIX, STATED AT EXACTLY ITS TRUE STRENGTH —
+ * NOT "the bug class is closed," WHICH WOULD BE THE SAME OVERCLAIM ROUND
+ * 4 MADE, ONE LEVEL UP: this closes the CLASS "a syntactically INVALID
+ * file is silently treated as if it had nothing to report," for any
+ * syntax error the compiler's own parser detects — not just the two
+ * reported shapes. It does NOT, and cannot, close "code that is
+ * syntactically VALID but never spells the forbidden operation as code
+ * at all" — see "WHAT IS AND ISN'T CAUGHT NOW" below, which now
+ * distinguishes VALID input's guarantee from INVALID input's fail-closed
+ * behavior explicitly, rather than collapsing both into one "no blind
+ * spots" sentence the way round 4's header did.
  *
  * WHAT COUNTS AS "A SPECIFIER" NOW, PRECISELY (the AST-native replacement
  * for the old text-based `SPECIFIER_CONTEXT_PATTERNS`): the module
  * specifier of an `ImportDeclaration` (`import ... from "x"` or the
- * side-effect-only `import "x"`), the expression of an
+ * side-effect-only `import "x"`), the moduleSpecifier of an
+ * `ExportDeclaration` (`export { x } from "y"` AND `export * from "y"` —
+ * ADDED IN ROUND 5, see below), the expression of an
  * `ExternalModuleReference` (`import x = require("x")`), and the first
  * argument of a `require(...)` call or a dynamic `import(...)` call
  * (detected via `isImportExpression`, the real AST predicate for the
@@ -166,6 +214,15 @@ import { API, type Project } from "typescript/unstable/sync";
  * non-literal argument outright instead of silently having nothing to
  * look at.
  *
+ * FIX (ROUND 5, SECOND FINDING): `export ... from "x"` AND `export *
+ * from "x"` produced ZERO specifier offenders under rounds 1–4 — `visit`
+ * never checked `ExportDeclaration.moduleSpecifier` at all, even though
+ * it is structurally identical to `ImportDeclaration.moduleSpecifier`
+ * and the existing `recordSpecifier` helper needed no changes to accept
+ * it. Every header through round 4 claimed completeness for "every
+ * import/require specifier" while this re-export path sat uncovered —
+ * an overclaim as well as a gap, both closed by this one added branch.
+ *
  * WHAT COUNTS AS "A BARE `fetch(` CALL" NOW: a `CallExpression` whose
  * `expression` is an `Identifier` with text `"fetch"` — the AST-native
  * replacement for the old `BARE_FETCH_TAIL` regex, with the identical
@@ -175,32 +232,43 @@ import { API, type Project } from "typescript/unstable/sync";
  * structurally, not because a regex's negative lookbehind/lookahead
  * happened to get the edge cases right.
  *
- * WHAT IS AND ISN'T CAUGHT NOW, STATED PLAINLY (see the "teeth"/
- * "false-positive discipline" blocks below for the direct proof of each
+ * WHAT IS AND ISN'T CAUGHT NOW, STATED PLAINLY, VALID AND INVALID INPUT
+ * KEPT DELIBERATELY SEPARATE (see the "teeth"/"false-positive
+ * discipline"/"fails closed" blocks below for the direct proof of each
  * claim, not just this paragraph's word):
- *   - CAUGHT: every case the old tokenizer's rounds 1–3 caught (a
- *     Prettier-wrapped multi-line import, a template-literal dynamic
- *     import, a bare `require()`, a side-effect-only import, `fetch(`
- *     hidden inside a `${...}` interpolation at any nesting depth), PLUS
- *     the round-4 regex-literal bypass (a real parser never confuses a
- *     regex literal for a template literal, or for anything else — that
- *     is not a special case, it is just correct parsing), PLUS a
- *     dynamically-computed import specifier (previously undetectable,
- *     now flagged as a non-relative offender).
- *   - STILL NOT CAUGHT, BY DESIGN, NOT OVERSIGHT: anything that never
- *     spells `fetch(` or an import/require CALL as CODE at all —
- *     `globalThis["fetch"]`, a destructured/aliased reference (`const f
- *     = fetch; f(url)`), or a keyword/URL typed out only inside an
- *     ORDINARY string/comment meant for `eval`/`Function(...)` later.
- *     Strings and comments stay deliberately opaque as DATA — the real
- *     parser does not execute or re-interpret their contents any more
- *     than the old tokenizer did, and re-scanning literal text for
- *     keywords would reintroduce exactly the false-positive-prone
- *     "cleverly parse a flexible surface" failure this file's own header
- *     already argues against. These gaps are semantic (the code never
- *     names the forbidden operation at all), not lexical (a real parser
- *     has no lexical/syntactic blind spots left for this file's scope —
- *     that is the whole point of using one).
+ *   - FOR SYNTACTICALLY VALID INPUT: every case the old tokenizer's
+ *     rounds 1–3 caught (a Prettier-wrapped multi-line import, a
+ *     template-literal dynamic import, a bare `require()`, a
+ *     side-effect-only import, `fetch(` hidden inside a `${...}`
+ *     interpolation at any nesting depth), PLUS the round-4 regex-
+ *     literal bypass (a real parser never confuses a regex literal for
+ *     a template literal — that is not a special case, it is just
+ *     correct parsing), PLUS a dynamically-computed import specifier and
+ *     a re-export's specifier (both previously undetectable, both now
+ *     flagged) are ALL caught, and a valid file has NO remaining
+ *     lexical/syntactic blind spot in this file's scope — that claim is
+ *     now scoped correctly to where it is actually true.
+ *   - FOR SYNTACTICALLY INVALID INPUT: rejected OUTRIGHT as an automatic
+ *     offender (round 5) — never scanned as if it were clean, regardless
+ *     of what error recovery would have done with it. This is a
+ *     DIFFERENT guarantee from the one above, not a stronger version of
+ *     it: it does not claim to know what a broken file "really" contains,
+ *     only that this guard refuses to certify one as clean.
+ *   - STILL NOT CAUGHT, ON VALID INPUT, BY DESIGN, NOT OVERSIGHT:
+ *     anything that never spells `fetch(` or an import/require/export
+ *     CALL as CODE at all — `globalThis["fetch"]`, a destructured/
+ *     aliased reference (`const f = fetch; f(url)`), or a keyword/URL
+ *     typed out only inside an ORDINARY string/comment meant for
+ *     `eval`/`Function(...)` later. Strings and comments stay
+ *     deliberately opaque as DATA — the real parser does not execute or
+ *     re-interpret their contents any more than the old tokenizer did,
+ *     and re-scanning literal text for keywords would reintroduce
+ *     exactly the false-positive-prone "cleverly parse a flexible
+ *     surface" failure this file's own header already argues against.
+ *     These are SEMANTIC gaps (the code never names the forbidden
+ *     operation at all, even once correctly parsed) — a genuinely
+ *     different category from the LEXICAL/SYNTACTIC ones rounds 1–5 were
+ *     about, and this file does not claim to have closed them.
  */
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
@@ -238,6 +306,29 @@ interface FoundBareFetchCall {
 }
 
 /**
+ * Thrown by `analyzeFile` the moment the real compiler reports ANY
+ * syntactic diagnostic for a file — see the file header's "THE FIX
+ * (ROUND 5)" paragraph for why this exists: error RECOVERY (not a
+ * thrown exception) is how a real parser normally handles broken input,
+ * and recovery can absorb a perfectly plain, valid statement following a
+ * syntax error into the wrong place in the tree, or drop it entirely, so
+ * a broken file can walk clean with zero findings. This class exists so
+ * a caller can distinguish "this file could not be trusted to scan at
+ * all" from any other exception without string-matching a message, the
+ * same discipline this codebase's own `PathResolutionError`/
+ * `RollbackStepFailedError` already established elsewhere.
+ */
+class UnparseableFileError extends Error {
+  constructor(file: string, diagnosticMessages: readonly string[]) {
+    super(
+      `could not parse ${file} as valid TypeScript — refusing to scan it as if it were clean ` +
+        `(${diagnosticMessages.length} syntax diagnostic(s)): ${diagnosticMessages.join("; ")}`,
+    );
+    this.name = "UnparseableFileError";
+  }
+}
+
+/**
  * ONE `API` instance for this whole file, spun up once and reused across
  * every test — spawning the real compiler's backing process costs real
  * (if small) time (tens of milliseconds), so paying it once in
@@ -258,6 +349,11 @@ afterAll(() => {
  * paragraphs for the precise rules. `file` must already exist on disk;
  * callers that only have source TEXT use `analyzeSource` below, which
  * materializes a scratch file first.
+ *
+ * FAILS CLOSED ON SYNTAX ERRORS (round 5, see file header): the very
+ * first thing this does, before any AST walk, is check
+ * `getSyntacticDiagnostics` — throwing `UnparseableFileError` rather
+ * than walking a tree error recovery may have silently reshaped.
  */
 function analyzeFile(file: string): { specifiers: readonly FoundSpecifier[]; bareFetchCalls: readonly FoundBareFetchCall[] } {
   const snapshot = api.updateSnapshot({ openFiles: [file] });
@@ -265,6 +361,12 @@ function analyzeFile(file: string): { specifiers: readonly FoundSpecifier[]; bar
   const sf: SourceFile | undefined = project?.program.getSourceFile(file);
   if (!project || !sf) {
     throw new Error(`analyzeFile: the real compiler could not load/parse ${file}`);
+  }
+
+  const diagnostics = project.program.getSyntacticDiagnostics(file);
+  if (diagnostics.length > 0) {
+    api.updateSnapshot({ closeFiles: [file] });
+    throw new UnparseableFileError(file, diagnostics.map((d) => d.text));
   }
 
   const specifiers: FoundSpecifier[] = [];
@@ -288,6 +390,14 @@ function analyzeFile(file: string): { specifiers: readonly FoundSpecifier[]; bar
 
   function visit(node: Node): void {
     if (isImportDeclaration(node)) {
+      recordSpecifier(node.moduleSpecifier);
+    } else if (isExportDeclaration(node)) {
+      // `export { x } from "y"` and `export * from "y"` — see file
+      // header's "FIX (ROUND 5, SECOND FINDING)": structurally identical
+      // to `ImportDeclaration.moduleSpecifier`, previously never
+      // checked. `moduleSpecifier` is `undefined` for a plain
+      // `export { x }` with no `from` clause — `recordSpecifier` already
+      // no-ops on `undefined`.
       recordSpecifier(node.moduleSpecifier);
     } else if (isImportEqualsDeclaration(node) && isExternalModuleReference(node.moduleReference)) {
       recordSpecifier(node.moduleReference.expression);
@@ -393,21 +503,37 @@ interface FetchOffender {
   readonly line: number;
 }
 
-function scan(): { specifierOffenders: SpecifierOffender[]; fetchOffenders: FetchOffender[] } {
+/** A real, on-disk file this guard refused to scan because the compiler could not parse it as valid TypeScript — see `UnparseableFileError` and the file header's "THE FIX (ROUND 5)" paragraph. Kept as its own list, never folded into `specifierOffenders`/`fetchOffenders`: "this file could not be checked" and "this file was checked and failed" are different findings and should not be reported as if they were the same one. */
+interface ParseOffender {
+  readonly file: string;
+  readonly message: string;
+}
+
+function scan(): { specifierOffenders: SpecifierOffender[]; fetchOffenders: FetchOffender[]; parseOffenders: ParseOffender[] } {
   const specifierOffenders: SpecifierOffender[] = [];
   const fetchOffenders: FetchOffender[] = [];
+  const parseOffenders: ParseOffender[] = [];
   for (const file of listNonTestSourceFiles(SIMULATE_ROOT)) {
-    const { specifiers, bareFetchCalls } = analyzeFile(file);
-    for (const { specifier, line } of specifiers) {
+    let result: { specifiers: readonly FoundSpecifier[]; bareFetchCalls: readonly FoundBareFetchCall[] };
+    try {
+      result = analyzeFile(file);
+    } catch (error) {
+      if (error instanceof UnparseableFileError) {
+        parseOffenders.push({ file: relative(REPO_ROOT, file), message: error.message });
+        continue;
+      }
+      throw error;
+    }
+    for (const { specifier, line } of result.specifiers) {
       if (!resolvesInsideAllowedRoots(file, specifier)) {
         specifierOffenders.push({ file: relative(REPO_ROOT, file), line, specifier });
       }
     }
-    for (const { line } of bareFetchCalls) {
+    for (const { line } of result.bareFetchCalls) {
       fetchOffenders.push({ file: relative(REPO_ROOT, file), line });
     }
   }
-  return { specifierOffenders, fetchOffenders };
+  return { specifierOffenders, fetchOffenders, parseOffenders };
 }
 
 describe("lib/simulate/** never reaches an LLM, the network, or a Node built-in", () => {
@@ -433,6 +559,18 @@ describe("lib/simulate/** never reaches an LLM, the network, or a Node built-in"
       throw new Error(`lib/simulate/** may never call the global fetch() — found ${fetchOffenders.length} call(s):\n${report}`);
     }
     expect(fetchOffenders).toEqual([]);
+  });
+
+  it("every non-test source file under lib/simulate/** parses as valid TypeScript — a file this guard cannot parse is an automatic offender, never silently treated as clean (round 5)", () => {
+    const { parseOffenders } = scan();
+    if (parseOffenders.length > 0) {
+      const report = parseOffenders.map((o) => `${o.file}: ${o.message}`).join("\n");
+      throw new Error(
+        `lib/simulate/** contains ${parseOffenders.length} file(s) this guard could not parse as valid TypeScript ` +
+          `— refusing to treat unparseable source as clean:\n${report}`,
+      );
+    }
+    expect(parseOffenders).toEqual([]);
   });
 
   describe("sanity: the containment rule itself", () => {
@@ -731,9 +869,45 @@ describe("lib/simulate/** never reaches an LLM, the network, or a Node built-in"
     expect(files.some((f) => f.includes("__tests__"))).toBe(false);
   });
 
-  it("sanity: this repo's OWN lib/simulate/** source passes both checks right now (a true positive on the real codebase, not just synthetic fixtures)", () => {
-    const { specifierOffenders, fetchOffenders } = scan();
+  it("sanity: this repo's OWN lib/simulate/** source passes all three checks right now (a true positive on the real codebase, not just synthetic fixtures)", () => {
+    const { specifierOffenders, fetchOffenders, parseOffenders } = scan();
     expect(specifierOffenders).toEqual([]);
     expect(fetchOffenders).toEqual([]);
+    expect(parseOffenders).toEqual([]);
+  });
+
+  describe("EXPLOIT REGRESSION (independent verification, round 5): syntax errors defeated the real parser's error recovery the same way earlier rounds defeated the tokenizer — the bug class MOVED, not closed, until diagnostics are checked", () => {
+    it("[HIGH] an unterminated template literal (a syntax error) fails closed instead of silently swallowing a real fetch(...) call", () => {
+      const exploit = ["const x = `unterminated", 'fetch("https://evil.example");', ""].join("\n");
+      expect(() => analyzeSource(exploit)).toThrow(UnparseableFileError);
+      expect(() => analyzeSource(exploit)).toThrow(/could not parse/);
+    });
+
+    it("[HIGH] a broken function signature (a syntax error) also fails closed", () => {
+      const exploit = ["function broken( {", 'fetch("https://evil.example");', ""].join("\n");
+      expect(() => analyzeSource(exploit)).toThrow(UnparseableFileError);
+      expect(() => analyzeSource(exploit)).toThrow(/could not parse/);
+    });
+
+    it("does NOT overtighten: the equivalent CLEAN input (no syntax error) still scans normally, proving the fail-closed path is triggered by the diagnostic, not by the shape of the snippet", () => {
+      const control = ["const x = 1;", 'fetch("https://evil.example");', ""].join("\n");
+      expect(analyzeSource(control).bareFetchCalls).toEqual([{ line: 2 }]);
+    });
+
+    it("[MEDIUM] a re-export (`export ... from` / `export * from`) was never checked for its specifier — closed alongside the specifier extraction rewrite", () => {
+      expect(analyzeSource('export { helper } from "openai";').specifiers).toEqual([{ specifier: "openai", line: 1 }]);
+      expect(analyzeSource('export * from "openai";').specifiers).toEqual([{ specifier: "openai", line: 1 }]);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "openai")).toBe(false);
+    });
+
+    it("does NOT overtighten: a re-export with no `from` clause at all (`export { helper };`) has no specifier to find, and is not flagged", () => {
+      expect(analyzeSource("const helper = 1;\nexport { helper };\n").specifiers).toEqual([]);
+    });
+
+    it("does NOT overtighten: a legitimate relative re-export is still accepted, not merely un-flagged", () => {
+      const result = analyzeSource('export { helper } from "./helper.js";');
+      expect(result.specifiers).toEqual([{ specifier: "./helper.js", line: 1 }]);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "./helper.js")).toBe(true);
+    });
   });
 });
