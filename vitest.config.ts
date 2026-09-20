@@ -19,7 +19,11 @@ export default defineConfig({
     // decision-engine's) can run. The dependency direction is unaffected:
     // app/ may import lib/, never the reverse, and no lib/ test imports
     // anything under app/.
-    include: ["lib/**/*.test.ts", "app/**/*.test.ts", "tests/**/*.test.ts"],
+    // "domains/**/*.test.ts" added at M6 — the same pre-added-ahead-of-need precedent this file already
+    // set for app/** and tests/** above: M6's freeze boundary (.genesis/PLAN.md) is "domains/**,
+    // scripts/demo-domains.ts", not lib/**, so this edit does not touch the frozen boundary; it only
+    // teaches vitest where M6's own tests live.
+    include: ["lib/**/*.test.ts", "app/**/*.test.ts", "tests/**/*.test.ts", "domains/**/*.test.ts"],
     watch: false,
   },
 });
