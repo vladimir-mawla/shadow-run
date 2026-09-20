@@ -63,7 +63,7 @@ describe("checkConsistency — the self-consistency check in isolation", () => {
     expect(result.problems.some((p) => p.includes('started at ["x","y","z"]') && p.includes('actually has ["a","b"]'))).toBe(true);
   });
 
-  it("DISCLOSED GAP (independent verification, MEDIUM finding), PINNED NOT FIXED: an 'append' whose 'after' SHRINKS the collection relative to an honest 'before' still passes — checkClaimedBefore verifies before is honest, never that after grew; see consistency.ts's 'DELIBERATELY NOT CHECKED' header note for why, matching effect-validation.ts's own increment-sign precedent", () => {
+  it("ENFORCED (independent verification, MEDIUM finding, round 2 — the narrow growth check): an 'append' whose 'after' SHRINKS an existing array 'before' is now rejected, not silently passed", () => {
     const data = { items: ["a", "b", "c"] };
     const shrinkingAppend = {
       deltas: [{ path: "items", before: ["a", "b", "c"], after: ["a", "b"], kind: "append" as const }],
@@ -72,13 +72,70 @@ describe("checkConsistency — the self-consistency check in isolation", () => {
       producedBy: "shadow-execution" as const,
     };
     const result = checkConsistency(data, shrinkingAppend);
-    // This asserts the DOCUMENTED, DELIBERATE behavior, not a desired
-    // one — a future milestone that wants to reject this must first
-    // answer the header's own open question (growth at what
-    // granularity, for what shapes), not flip this assertion in
-    // isolation.
+    expect(result.ok).toBe(false);
+    expect(result.problems.some((p) => p.includes('claims "append"') && p.includes("not shrink it"))).toBe(true);
+  });
+
+  it("ENFORCED sanity: an 'append' whose 'after' is not even an array, while 'before' was one, is rejected the same way (treated as the most extreme shrink)", () => {
+    const data = { items: ["a", "b"] };
+    const replacedWithScalar = {
+      deltas: [{ path: "items", before: ["a", "b"], after: "oops", kind: "append" as const }],
+      resultingFingerprint: computeFingerprint({ items: "oops" }),
+      assumptions: [],
+      producedBy: "shadow-execution" as const,
+    };
+    const result = checkConsistency(data, replacedWithScalar);
+    expect(result.ok).toBe(false);
+    expect(result.problems.some((p) => p.includes('claims "append"') && p.includes("not shrink it"))).toBe(true);
+  });
+
+  it("ENFORCED sanity: growing (or exactly preserving the length of) an existing array 'before' is still accepted — the check is a floor, not a requirement to strictly grow", () => {
+    const data = { items: ["a", "b"] };
+    const sameLength = {
+      deltas: [{ path: "items", before: ["a", "b"], after: ["a", "c"], kind: "append" as const }],
+      resultingFingerprint: computeFingerprint({ items: ["a", "c"] }),
+      assumptions: [],
+      producedBy: "shadow-execution" as const,
+    };
+    expect(checkConsistency(data, sameLength).ok).toBe(true);
+  });
+
+  it("ENFORCED sanity: a fresh-leaf 'append' (before: undefined — every real domains/** append today) is exempt from the growth check entirely, not merely passing it vacuously", () => {
+    const data = {};
+    const freshLeaf = {
+      deltas: [{ path: "items", before: undefined, after: ["a"], kind: "append" as const }],
+      resultingFingerprint: computeFingerprint({ items: ["a"] }),
+      assumptions: [],
+      producedBy: "shadow-execution" as const,
+    };
+    expect(checkConsistency(data, freshLeaf).ok).toBe(true);
+  });
+
+  it("DISCLOSED GAP (independent verification, MEDIUM finding), PINNED NOT FIXED — narrower than before: a SAME-LENGTH-OR-LONGER but UNRELATED replacement of an existing array still passes; the growth check enforces a length floor, not 'after is really an extension of before'", () => {
+    const data = { items: ["a", "b"] };
+    const unrelatedReplacement = {
+      deltas: [{ path: "items", before: ["a", "b"], after: ["x", "y", "z"], kind: "append" as const }],
+      resultingFingerprint: computeFingerprint({ items: ["x", "y", "z"] }),
+      assumptions: [],
+      producedBy: "shadow-execution" as const,
+    };
+    const result = checkConsistency(data, unrelatedReplacement);
+    // Documents the DELIBERATE remaining gap named in consistency.ts's
+    // header ("STILL GENUINELY DISCLOSED", point 1) — not a desired
+    // outcome to preserve for its own sake.
     expect(result.ok).toBe(true);
     expect(result.problems).toEqual([]);
+  });
+
+  it("DISCLOSED GAP: a non-array 'append' target (an object-valued collection) is outside the growth check's scope entirely — see consistency.ts's header, point 2", () => {
+    const data = { tags: { a: 1 } };
+    const nonArrayAppend = {
+      deltas: [{ path: "tags", before: { a: 1 }, after: { a: 1, b: 2 }, kind: "append" as const }],
+      resultingFingerprint: computeFingerprint({ tags: { a: 1, b: 2 } }),
+      assumptions: [],
+      producedBy: "shadow-execution" as const,
+    };
+    expect(checkConsistency(data, nonArrayAppend).ok).toBe(true);
   });
 
   it("LAYER 2: catches a resultingFingerprint that doesn't match what the deltas actually produce", () => {

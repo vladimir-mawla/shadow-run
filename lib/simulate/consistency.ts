@@ -68,72 +68,79 @@ import { deleteAtPath, getAtPath, PathResolutionError, setAtPath } from "./path.
  * this file in line with every other consumer of `Delta` in this
  * codebase.
  *
- * NAMED GAP LEFT BY THE REOPENING, DISCLOSED RATHER THAN CLOSED (found by
- * independent verification while reviewing the reopening above): dropping
- * the `append`-must-start-`undefined` rule means `checkClaimedBefore` no
- * longer checks anything about the RELATIONSHIP between `before` and
- * `after` for an `append` — only that `before` is honest. An `append`
- * whose `after` actually SHRINKS the collection, is a NO-OP, or is a
- * wholesale unrelated replacement still passes, as long as `before`
- * matches:
+ * NAMED GAP LEFT BY THE REOPENING (found by independent verification
+ * while reviewing the reopening above), NOW PARTIALLY CLOSED, PARTIALLY
+ * DISCLOSED — the two are not the same thing and this file does not
+ * blur them: dropping the `append`-must-start-`undefined` rule means
+ * `checkClaimedBefore` no longer checks anything about the RELATIONSHIP
+ * between `before` and `after` for an `append` on its own — only that
+ * `before` is honest. `checkAppendGrowth` (below) now enforces exactly
+ * ONE narrow, well-evidenced slice of that relationship; everything
+ * outside that slice remains genuinely unchecked, named explicitly so a
+ * future reader does not have to rediscover which is which.
+ *
+ * ENFORCED (verified against every real call site before being adopted
+ * — see the PR that carries this comment for the confirmation): when
+ * `delta.kind === "append"` AND `delta.before` is a real, defined
+ * ARRAY, `delta.after` must ALSO be an array with AT LEAST as many
+ * elements. A first version of this disclosure justified doing nothing
+ * by citing this file's own remove-then-append example and
+ * `domains/infra/domain.ts`'s multi-step `desiredCount` pipeline as
+ * cases a growth check would wrongly reject — independent verification
+ * checked both against the real code and found neither supports that:
+ * `domains/shared/grow.ts`'s `growArraySteps` (every real array-growing
+ * domain's actual `append` step) is ALWAYS `{ before: undefined, after:
+ * fullArray }` — fresh-leaf creation, never a `before`-is-a-defined-
+ * array shrink — and `desiredCount`'s pipeline uses `kind: "set"`, not
+ * `"append"`, so it was never actually a counter-example for THIS
+ * `kind` at all, only an analogy. A rule scoped to "`before` is a
+ * defined array, `after` must not have fewer elements" fires on NEITHER
+ * cited case and changes nothing `domains/**` currently does —
+ * `npm run demo:domains` staying 7/7 with this check live is the direct
+ * proof, not an assumption.
  *
  *     checkConsistency({ items: ["a","b","c"] }, { deltas: [{ path:
  *     "items", before: ["a","b","c"], after: ["a","b"], kind: "append"
- *     }], ... }) // → { ok: true }
+ *     }], ... }) // → { ok: false } (was `{ ok: true }` before this check)
  *
- * even though `after` has FEWER elements than `before` — the opposite of
- * what "append" means in `delta.ts`'s own prose ("add a value to a
- * collection"). Under the OLD rule this specific case happened to be
- * unreachable (an append could only ever start from `undefined`, so
- * "shrink relative to before" had no `before` to shrink FROM) — it is a
- * gap the reopening WIDENS the reach of, not one it introduces from
- * nothing, and it is disclosed here rather than silently left for a
- * future reader to rediscover.
+ * STILL GENUINELY DISCLOSED, NOT ENFORCED, AND THE REMAINING REASONS ARE
+ * NARROWER THAN THE FIRST VERSION OF THIS PARAGRAPH CLAIMED (they now
+ * justify NOT GENERALIZING further, not doing nothing):
  *
- * DELIBERATELY NOT CHECKED, FOR THE SAME REASON `effect-validation.ts`'s
- * `increment` coherence check deliberately does NOT check the SIGN of an
- * increment's change (see that file's header): checking "did this kind's
- * `before`/`after` move in the direction its label implies" is a
- * DIRECTIONAL/semantic claim about `kind`, not a STRUCTURAL claim about
- * whether `before` is honest — and this file's Layer 1 has only ever been
- * the latter. Three concrete reasons a growth check is not added here,
- * not just one:
+ *   1. A SAME-LENGTH OR LONGER, BUT UNRELATED, REPLACEMENT still passes
+ *      — `{ before: ["a","b"], after: ["x","y","z"] }` is "growth" by
+ *      length alone and is accepted, even though it is not really an
+ *      append of anything from `before`. Catching this needs a real
+ *      notion of "is `after` a superset/extension of `before`," which
+ *      this file does not attempt — that would be inventing a bespoke,
+ *      order-and-duplicate-sensitive comparison this codebase has never
+ *      needed before, for a case no real domain in this milestone
+ *      produces.
+ *   2. NON-ARRAY `append` TARGETS are entirely outside this check's
+ *      scope, on purpose: `delta.ts` never restricts `append`'s payload
+ *      to arrays, and `before`/`after` are `unknown` by design — a
+ *      generic "growth" notion for an object- or scalar-valued `append`
+ *      has no obvious single definition, and inventing one would be
+ *      exactly the kind of per-shape heuristic Layer 1's honesty check
+ *      has never made for any other `kind`. (When `delta.before` is
+ *      `undefined` — the fresh-leaf case, and every real `domains/**`
+ *      append today — this check does not apply at all, by the same
+ *      "defined array" precondition.)
+ *   3. Precedent, in this exact file: `effect-validation.ts`'s
+ *      `increment` check enforces "numeric," never "increasing" —
+ *      `after < before` is explicitly, deliberately accepted as "a
+ *      legitimate decrement" per `delta.ts`'s "signed" wording. The
+ *      growth check above does not extend past arrays for the same
+ *      reason that precedent does not extend past numeric coherence:
+ *      verify structural honesty and the one type constraint that is
+ *      actually well-defined, never invent a broader semantic rule
+ *      `delta.ts` itself never committed to.
  *
- *   1. "Growth" has no well-defined generic meaning across `unknown`
- *      JSON values. It is intuitive for an array (`after.length >
- *      before.length`?), but `delta.ts` never restricts `append`'s
- *      payload to arrays specifically — `before`/`after` are `unknown`
- *      by design (this file's own `deepEqualJson` handles objects and
- *      primitives too) — so any rule would either silently assume
- *      "arrays only" (quietly narrowing what `append` is allowed to
- *      describe, a bigger reopening than this one) or need its own
- *      per-shape heuristics, which is exactly the kind of judgment call
- *      Layer 1's honesty check has never made for any other `kind`.
- *   2. A single delta's local `before`/`after` cannot be judged in
- *      isolation against "the whole effect's" intent — this file's OWN
- *      multi-delta example two paragraphs below (`remove` at `"a.b"`
- *      followed by an `append` recreating `"a.b.c"`) is proof that one
- *      step's `after` legitimately looking like a regression is
- *      sometimes exactly what a correct multi-step pipeline produces at
- *      an intermediate point; `domains/infra/domain.ts`'s own multi-step
- *      `desiredCount` pipeline (drained then restored, across `"set"`
- *      deltas) is the same principle for a different `kind`. A rule that
- *      judges one delta's shape without the surrounding effect would risk
- *      rejecting exactly the multi-step case ADR 0004's own header already
- *      treats as legitimate.
- *   3. Precedent, in this exact file: `effect-validation.ts`'s `increment`
- *      check enforces "numeric," never "increasing" — `after < before` is
- *      explicitly, deliberately accepted as "a legitimate decrement" per
- *      `delta.ts`'s "signed" wording. The same philosophy — verify
- *      structural honesty and (where `delta.ts` names a real type
- *      constraint) type coherence, never a `kind`-implied DIRECTION —
- *      applies here without inventing a new standard just for `append`.
- *
- * A future milestone that wants "append never shrinks" as an enforced
- * property has a real, well-scoped question to answer first — what
- * counts as growth for a non-array `append` target, and at what
- * granularity (one delta, or the whole effect) — not a bug to patch
- * silently into this function.
+ * A future milestone that wants MORE than the narrow slice enforced here
+ * — same-length unrelated replacement, or any notion of growth for a
+ * non-array `append` target — has a real, well-scoped question to
+ * answer first (what does "growth" mean for that shape, checked at what
+ * granularity), not a bug to patch silently into this function.
  *
  * LAYER 2 — FINAL FINGERPRINT CONSISTENCY. After applying every delta (in
  * order — order matters when two deltas touch related paths, e.g. a
@@ -222,6 +229,14 @@ export function checkConsistency(data: Json, effect: ProjectedEffect): Consisten
  * which already handles BOTH `current === undefined` (via `a === b` in
  * `deepEqualJson`, since `undefined === undefined`) and a real populated
  * value, with no separate case needed.
+ *
+ * ONE ADDITIONAL CHECK FOR `"append"`, ONLY REACHED ONCE `before` ITSELF
+ * IS ALREADY CONFIRMED HONEST (see `checkAppendGrowth` below and the file
+ * header's "ENFORCED"/"STILL GENUINELY DISCLOSED" paragraphs for exactly
+ * what this does and does not cover): checking growth against a
+ * `before` that has not yet been verified against `current` would be
+ * checking the delta's story against itself, not against the world —
+ * this file's Layer 1 has never done that for any other rule.
  */
 function checkClaimedBefore(delta: Delta, current: Json | undefined, index: number): ConsistencyProblem | undefined {
   if (delta.kind !== "append" && current === undefined) {
@@ -233,7 +248,33 @@ function checkClaimedBefore(delta: Delta, current: Json | undefined, index: numb
       `but the input World.data actually has ${JSON.stringify(current)} there`
     );
   }
+  if (delta.kind === "append") {
+    const growthProblem = checkAppendGrowth(delta, index);
+    if (growthProblem !== undefined) return growthProblem;
+  }
   return undefined;
+}
+
+/**
+ * The one narrow slice of "does `append` actually grow the collection"
+ * this file enforces — see the file header's "ENFORCED" paragraph for
+ * the evidence this was checked against before being adopted. Applies
+ * ONLY when `delta.before` is a real, defined ARRAY (a fresh-leaf
+ * `append`, where `before` is `undefined`, is exempt by construction —
+ * there is nothing to shrink FROM); when it applies, `delta.after` must
+ * ALSO be an array with at least as many elements. A non-array `after`
+ * is treated as the most extreme case of "fewer elements" (there being
+ * none), not a separate rule.
+ */
+function checkAppendGrowth(delta: Delta, index: number): ConsistencyProblem | undefined {
+  if (!Array.isArray(delta.before)) return undefined;
+  const afterLength = Array.isArray(delta.after) ? delta.after.length : -1;
+  if (afterLength >= delta.before.length) return undefined;
+  return (
+    `deltas[${index}] claims "append" at path "${delta.path}", but after (${JSON.stringify(delta.after)}) does not ` +
+    `represent growth over before (${JSON.stringify(delta.before)}) — an append targeting an existing array must ` +
+    `not shrink it`
+  );
 }
 
 /** Forward-applies one delta to `working` — see file header's reading of `Delta.kind` semantics: `"set" | "increment" | "append"` all resolve to "the leaf at `path` becomes `after`" mechanically (they differ only in what they mean for reconciliation, M4's job, per `delta.ts`'s own comment); `"remove"` deletes the leaf outright. */
