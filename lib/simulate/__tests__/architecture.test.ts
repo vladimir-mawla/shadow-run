@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 /**
@@ -114,6 +115,60 @@ import { dirname, join, relative, resolve, sep } from "node:path";
  * `root + sep` (never a bare `startsWith(root)`), so a sibling directory
  * that merely starts with the same characters — `lib/simulate-experimental`
  * against `lib/simulate` — cannot pass by string-prefix coincidence.
+ *
+ * FIX (independent verification, SECOND round): THE FIRST FIX CHECKED THE
+ * TEXTUAL PATH, NOT THE REAL ONE — the same class of gap, one layer
+ * deeper. `resolve()` is pure string arithmetic; it never dereferences a
+ * symlink. So a REAL symlink placed inside `lib/simulate/` — e.g.
+ * `lib/simulate/zz-attack-symlink` pointing at an arbitrary directory
+ * outside the repository — made `resolvesInsideAllowedRoots(fromFile,
+ * "./zz-attack-symlink/evil.js")` return `true`: the computed path's TEXT
+ * starts with `SIMULATE_ROOT + sep`, so the textual check (correctly)
+ * passed it, but Node's real module resolution DOES follow symlinks, so
+ * this would actually load external code at runtime. Confirmed with a
+ * real symlink (`ln -s`, not a synthetic string), not assumed. Git tracks
+ * symlinks as ordinary repository objects, so one can land in a future
+ * commit exactly like any other file.
+ *
+ * THE FIX: `resolvesToRealAllowedPath` (below) additionally
+ * `realpathSync`s the resolved path and checks THAT against
+ * `realpathSync`'d allowed roots — layered ON TOP OF the textual check,
+ * never instead of it (see the three points below; the third is why both
+ * checks stay). Three things had to be gotten right, each because a
+ * naive `realpathSync` fix commonly gets it wrong:
+ *
+ *   1. `realpathSync` THROWS on a path that does not exist — and every
+ *      real, legitimate specifier in this codebase's own source ends in
+ *      `.js` while pointing at a same-named `.ts` file on disk (this
+ *      repo's NodeNext convention; `next.config.ts`'s own
+ *      `extensionAlias` comment documents the same mapping), so the
+ *      literal resolved path routinely does not exist under that exact
+ *      name. FAIL CLOSED, deliberately, in the genuinely-unresolvable
+ *      case: if the exact leaf does not exist, this falls back to
+ *      realpath-ing its ENCLOSING DIRECTORY instead (safe, because a
+ *      name that doesn't exist at all cannot itself be a symlink escaping
+ *      anywhere — the only thing left to distrust is the directory it
+ *      would live in, which a genuine import needs to actually exist
+ *      regardless of the leaf's exact extension). If NEITHER the leaf nor
+ *      its directory resolves to anything real, the specifier is
+ *      REJECTED — never waved through just because this check couldn't
+ *      pin down where it actually goes.
+ *   2. THE ROOTS ARE REALPATH'D TOO, once, at module load
+ *      (`REAL_ALLOWED_ROOTS` below) — comparing a realpath'd candidate
+ *      against un-realpath'd roots would misfire the moment the
+ *      repository itself sits under a symlink (common on macOS, where
+ *      `/tmp` is itself a symlink to `/private/tmp`), producing a false
+ *      rejection of a perfectly legitimate, correctly-contained file —
+ *      a failure mode that LOOKS like a working guard while actually
+ *      being simply wrong. Both sides of the comparison are normalized
+ *      the same way, or the comparison means nothing.
+ *   3. THE TEXTUAL CHECK STAYS — `resolvesInsideAllowedRoots` runs it
+ *      FIRST and only proceeds to the realpath check if it passes. Two
+ *      independent checks that can each fail on their own terms (one
+ *      catching a `../` escape with no symlink involved at all, the
+ *      other catching a symlink that textually looks contained) beat one
+ *      clever combined one — this repo's own drift-guard history is the
+ *      standing argument for why, paid for five times over already.
  */
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
@@ -121,6 +176,8 @@ const SIMULATE_ROOT = join(REPO_ROOT, "lib", "simulate");
 const CONTRACTS_ROOT = join(REPO_ROOT, "lib", "contracts");
 /** The closed list of directories a `lib/simulate/**` source file may resolve an import into — itself, and the one frozen dependency it is allowed to use. See the file header's "FIX" paragraph for why containment against THIS list, not specifier syntax, is the actual property being checked. */
 const ALLOWED_ROOTS: readonly string[] = [SIMULATE_ROOT, CONTRACTS_ROOT];
+/** The SAME roots, realpath'd once at module load — see the file header's "FIX (SECOND round)" point 2 for why comparing a realpath'd candidate against these un-normalized `ALLOWED_ROOTS` would be wrong: both sides of every real-path comparison must go through the identical normalization, or the comparison proves nothing. Computed eagerly, not defensively wrapped in try/catch: `lib/simulate/` and `lib/contracts/` not existing at all would mean this very test file couldn't have been found to run in the first place — a hard failure worth surfacing immediately, not a case to "fail closed" gracefully around. */
+const REAL_ALLOWED_ROOTS: readonly string[] = ALLOWED_ROOTS.map((root) => realpathSync(root));
 /** A representative real file location, used throughout this file's synthetic (no-real-file-needed) specifier checks below — `resolve()` is pure path arithmetic and does not require `adapter.ts` to be the file actually being checked. */
 const FROM_ADAPTER = join(SIMULATE_ROOT, "adapter.ts");
 
@@ -250,21 +307,64 @@ function tokenize(source: string): { specifiers: readonly FoundSpecifier[]; bare
 }
 
 /**
+ * Checks `candidate` (already assumed to be a REAL, realpath'd absolute
+ * path — never call this with a merely-resolved-but-not-yet-realpath'd
+ * one) against `REAL_ALLOWED_ROOTS`. Factored out so both the leaf-level
+ * and directory-level fallbacks in `resolvesToRealAllowedPath` (below)
+ * compare against the exact same normalized roots.
+ */
+function isRealPathContained(candidate: string): boolean {
+  return REAL_ALLOWED_ROOTS.some((root) => candidate === root || candidate.startsWith(root + sep));
+}
+
+/**
+ * The SECOND check `resolvesInsideAllowedRoots` runs, ONLY on a path that
+ * already passed the textual one — see the file header's "FIX (SECOND
+ * round)" paragraph for the full argument on why this exists and the
+ * three things it had to get right. Tries the exact resolved leaf first
+ * (catches a symlink placed AT that exact name, whether a file or a
+ * directory); if that name does not exist at all, falls back to the
+ * enclosing directory (safe — a nonexistent name cannot itself be a
+ * symlink, and the directory it would live in is what a genuine import
+ * actually depends on existing); if NEITHER resolves to anything real,
+ * fails closed.
+ */
+function resolvesToRealAllowedPath(resolved: string): boolean {
+  try {
+    return isRealPathContained(realpathSync(resolved));
+  } catch {
+    // Falls through to the directory-level attempt below — see this
+    // function's own doc comment and the file header's point 1.
+  }
+  try {
+    return isRealPathContained(realpathSync(dirname(resolved)));
+  } catch {
+    return false; // FAIL CLOSED: neither the leaf nor its enclosing directory resolves to anything real.
+  }
+}
+
+/**
  * A specifier is allowed if and only if (1) it is syntactically relative
  * (`./...` or `../...` — a bare specifier like `"openai"` or `"node:fs"`
  * is rejected outright here, BEFORE any path resolution: `resolve()`
  * would otherwise happily treat a bare string as relative-to-`fromFile`
  * too, which is not how Node's real module resolution treats a bare
- * specifier, and would be the wrong question to ask of one anyway) AND
- * (2) resolving it against `fromFile`'s real directory lands inside one
- * of `ALLOWED_ROOTS` — see the file header's "FIX" paragraph for the
- * exact exploit this containment check exists to close, which a syntax-
- * only check (`specifier.startsWith("./")`) already missed once.
+ * specifier, and would be the wrong question to ask of one anyway),
+ * (2) resolving it against `fromFile`'s real directory lands TEXTUALLY
+ * inside one of `ALLOWED_ROOTS` — see the file header's "FIX" paragraph
+ * for the exact exploit this containment check exists to close, which a
+ * syntax-only check (`specifier.startsWith("./")`) already missed once —
+ * AND (3) that same resolved path ALSO lands inside the allowed roots
+ * once symlinks are followed (`resolvesToRealAllowedPath`) — see the
+ * file header's "FIX (SECOND round)" paragraph for the exploit THIS half
+ * exists to close, which the textual check alone could not.
  */
 function resolvesInsideAllowedRoots(fromFile: string, specifier: string): boolean {
   if (!specifier.startsWith("./") && !specifier.startsWith("../")) return false;
   const resolved = resolve(dirname(fromFile), specifier);
-  return ALLOWED_ROOTS.some((root) => resolved === root || resolved.startsWith(root + sep));
+  const textuallyContained = ALLOWED_ROOTS.some((root) => resolved === root || resolved.startsWith(root + sep));
+  if (!textuallyContained) return false;
+  return resolvesToRealAllowedPath(resolved);
 }
 
 interface SpecifierOffender {
@@ -369,6 +469,83 @@ describe("lib/simulate/** never reaches an LLM, the network, or a Node built-in"
       // treated as importing from inside lib/simulate/ itself — this
       // guards the `root + sep` comparison, not `startsWith(root)`.
       expect(resolvesInsideAllowedRoots(fakeSiblingFile, "./evil-payload.js")).toBe(false);
+    });
+
+    it("EXPLOIT REGRESSION (HIGH-2, ROUND 2 — independent verification): a REAL symlink inside lib/simulate/, pointing at a directory outside the repository, is rejected once dereferenced", () => {
+      // A genuine filesystem symlink, created for the duration of this
+      // one test only — never committed, never left behind. This is the
+      // exact exploit shape independent verification confirmed: a
+      // symlink whose TEXTUAL path looks fully contained inside
+      // lib/simulate/, but whose REAL target is not.
+      const symlinkName = "__zz_symlink_regression_do_not_commit__";
+      const symlinkPath = join(SIMULATE_ROOT, symlinkName);
+      const externalTarget = mkdtempSync(join(tmpdir(), "shadow-run-symlink-attack-"));
+      writeFileSync(join(externalTarget, "evil.js"), "export default 1;\n");
+
+      try {
+        symlinkSync(externalTarget, symlinkPath, "dir");
+        const specifier = `./${symlinkName}/evil.js`;
+        const resolved = resolve(dirname(FROM_ADAPTER), specifier);
+
+        // Confirm the premise: TEXTUALLY, this specifier does not escape
+        // lib/simulate/ at all — it is one path segment inside it. The
+        // textual check alone would (correctly, on its own terms) pass
+        // this; the symlink is what makes the real target different.
+        expect(resolved.startsWith(SIMULATE_ROOT + sep)).toBe(true);
+
+        // But the REAL, dereferenced path is the external directory
+        // this symlink actually points to — confirmed directly, not
+        // assumed, the same way independent verification confirmed it.
+        const real = realpathSync(resolved);
+        expect(real.startsWith(SIMULATE_ROOT + sep)).toBe(false);
+        expect(real.startsWith(CONTRACTS_ROOT + sep)).toBe(false);
+
+        expect(resolvesInsideAllowedRoots(FROM_ADAPTER, specifier)).toBe(false);
+      } finally {
+        // Cleanup runs even if an assertion above throws — no symlink,
+        // and no scratch directory, is ever left behind for git to see.
+        rmSync(symlinkPath, { force: true, recursive: true }); // recursive is safe here — Node never dereferences a symlink for removal, it just unlinks the symlink entry itself; recursive is only needed because rmSync's own directory-ness check sees a symlink-to-directory and otherwise refuses.
+        rmSync(externalTarget, { recursive: true, force: true });
+      }
+    });
+
+    it("sanity: a symlinked DIRECTORY that points somewhere legitimate (still outside both roots, but not malicious) is treated identically — this check is about containment, not intent", () => {
+      // Same mechanism as the exploit regression above, confirming the
+      // check has no special-case for "looks like an attack" — it
+      // rejects ANY real escape, benign-looking or not, which is the
+      // only way a structural check can stay honest.
+      const symlinkName = "__zz_symlink_benign_do_not_commit__";
+      const symlinkPath = join(SIMULATE_ROOT, symlinkName);
+      const externalTarget = mkdtempSync(join(tmpdir(), "shadow-run-symlink-benign-"));
+      writeFileSync(join(externalTarget, "harmless.js"), "export default 2;\n");
+
+      try {
+        symlinkSync(externalTarget, symlinkPath, "dir");
+        expect(resolvesInsideAllowedRoots(FROM_ADAPTER, `./${symlinkName}/harmless.js`)).toBe(false);
+      } finally {
+        rmSync(symlinkPath, { force: true, recursive: true }); // recursive is safe here — Node never dereferences a symlink for removal, it just unlinks the symlink entry itself; recursive is only needed because rmSync's own directory-ness check sees a symlink-to-directory and otherwise refuses.
+        rmSync(externalTarget, { recursive: true, force: true });
+      }
+    });
+
+    it("FAIL CLOSED (round-2 fix, point 1): a specifier whose target does not exist under any name — leaf or enclosing directory — is rejected, not waved through", () => {
+      // Neither "totally-nonexistent-dir" nor anything inside it exists
+      // on disk at all. resolvesToRealAllowedPath's own directory-level
+      // fallback must itself fail here, and the overall function must
+      // return false, not throw and not default to true.
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "./totally-nonexistent-dir/also-nonexistent.js")).toBe(false);
+    });
+
+    it("does not regress the legitimate .js-specifier-to-.ts-file convention this codebase actually uses (the directory-level fallback's whole reason to exist)", () => {
+      // These are real, load-bearing cases: every genuine import in this
+      // milestone's own source is exactly this shape — a ".js" specifier
+      // whose literal name does not exist, because the real file on disk
+      // is ".ts" (this repo's NodeNext convention). The round-2 fix's
+      // leaf-then-directory fallback must keep accepting these, not just
+      // the round-1 fix's textual check.
+      expect(existsSync(join(SIMULATE_ROOT, "action.js"))).toBe(false); // confirms the premise: the literal name really is absent.
+      expect(existsSync(join(SIMULATE_ROOT, "action.ts"))).toBe(true); // the real file, under a different extension.
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "./action.js")).toBe(true);
     });
   });
 

@@ -232,6 +232,56 @@ change to a counter" — a declared meaning this file was silently not checking 
   validator's behavior match `Delta`'s own declared contract for the one kind that makes a numeric claim,
   and no more.
 
+## Decision 8 — The import-containment check (Decision, HIGH-2 finding) had a second gap: symlinks
+
+`__tests__/architecture.test.ts`'s `resolvesInsideAllowedRoots` (added to fix the first HIGH-2 finding —
+see the "Alternatives rejected" summary below) checked whether a specifier's TEXTUALLY resolved path landed
+inside `lib/simulate/`/`lib/contracts/`. A second round of independent verification confirmed a real,
+working exploit one layer deeper: a REAL symlink placed inside `lib/simulate/`, pointing at an arbitrary
+directory outside the repository, made the check return `true`. `resolve()` is pure string arithmetic and
+never dereferences a symlink, so the computed path's TEXT still started with `SIMULATE_ROOT + sep` — but
+Node's real module resolution DOES follow symlinks, so this would actually load external code at runtime.
+Git tracks symlinks as ordinary repository objects, so one can land in a future commit exactly like any
+other file; this is not a contrived, machine-only concern.
+
+**Alternatives considered for the fix:**
+
+- **Replace the textual check with a realpath-only check.** Rejected: a resolved path that escapes
+  TEXTUALLY (the original HIGH-2 case, `../../node_modules/...`, no symlink involved at all) is a different
+  failure with a different cause; collapsing both checks into one loses the ability to say WHICH kind of
+  escape happened, and — the more important reason — this repo's own drift-guard history (bypassed five
+  times) is a standing argument that one clever combined check is less robust than two independent checks
+  that each fail on their own terms. **Chosen: keep the textual check AND add the realpath check**, run in
+  that order, both required to pass.
+- **`realpathSync` the resolved leaf path only, with no fallback.** Rejected: every real, legitimate
+  specifier in this codebase's own source ends in `.js` while pointing at a same-named `.ts` file (this
+  repo's NodeNext convention — `next.config.ts`'s own `extensionAlias` comment documents the identical
+  mapping), so the literal resolved path routinely does not exist under that exact name and `realpathSync`
+  would throw for every ordinary, legitimate import in this milestone's own source — not just for an
+  attack. **Chosen:** if the exact leaf does not resolve, fall back to realpath-ing its ENCLOSING DIRECTORY
+  instead. This is safe, not a loophole: a name that does not exist at all cannot itself be a symlink
+  escaping anywhere, so the only thing left to distrust once the leaf is confirmed absent is the directory
+  it would live in — which a genuine import needs to actually exist regardless of the leaf's exact
+  extension. If NEITHER the leaf nor its directory resolves to anything real, the specifier is REJECTED —
+  fail closed, per the build brief's own instruction, never waved through just because this check could not
+  pin down where it actually goes.
+- **Compare the realpath'd candidate against the UN-realpath'd `ALLOWED_ROOTS`.** Rejected: if the
+  repository itself sits under a symlinked path (common on macOS, where `/tmp` is itself a symlink to
+  `/private/tmp`), a correctly-contained, legitimate file's realpath would not textually match an
+  un-normalized root, producing a FALSE REJECTION that looks like a working guard while actually being
+  simply wrong. **Chosen:** realpath the allowed roots too, once, at module load
+  (`REAL_ALLOWED_ROOTS`) — both sides of every real-path comparison go through the identical
+  normalization.
+
+**Proof, not just argument:** a real symlink (`fs.symlinkSync`, not a synthetic string) is created for the
+duration of exactly one test, pointed at a real temporary directory outside the repository, exercised
+against `resolvesInsideAllowedRoots`, and torn down in a `finally` block — nothing is left on disk or in
+git afterward. A second test confirms the fallback does NOT regress the legitimate `.js`-specifier-to-`.ts`-
+file convention this milestone's own source relies on everywhere (`existsSync` confirms the literal `.js`
+name is genuinely absent and the real `.ts` file is what's actually on disk, then confirms the specifier
+still resolves as allowed). A third test confirms the fail-closed case: a specifier pointing at a name that
+does not exist under ANY extension, anywhere, is rejected rather than defaulting to permissive.
+
 ## Consequences
 
 - Positive: `SimulationResult`'s fail-closed shape means no downstream code (M4's reconciler, M6's domain
@@ -281,6 +331,15 @@ change to a counter" — a declared meaning this file was silently not checking 
   misses a real class of lie a final-hash-only check cannot see.
 - Deferring the self-consistency check entirely until M5's `applyDeltas` exists (Decision 4) — gives up a
   cheap, strong, available-now guarantee to avoid a small, named, forward-noted duplication.
+- Checking only the TEXTUALLY resolved import path (Decision 8) — misses a real symlink, confirmed with a
+  working exploit, that makes a textually-contained path resolve to real, external code at runtime.
+- Replacing the textual containment check with a realpath-only one (Decision 8) — loses the ability to
+  distinguish a pure `../`-escape from a symlink escape, and repeats the "one clever combined check" mistake
+  this repo's own drift-guard history already argues against.
+- `realpathSync`-ing the resolved leaf with no directory-level fallback (Decision 8) — would reject every
+  ordinary `.js`-to-`.ts` specifier this milestone's own source actually uses, not just an attack.
+- Comparing a realpath'd candidate against un-realpath'd allowed roots (Decision 8) — produces false
+  rejections the moment the repository itself sits under a symlink, a real condition on macOS.
 
 <!-- Copy this file to NNNN-<slug>.md for each irreversible decision.
      Then add a one-line pointer in wiki/index.md if it becomes something later milestones need to find. -->
