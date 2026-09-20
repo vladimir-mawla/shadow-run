@@ -10,11 +10,23 @@ import {
  * prerendered response from build time forever after — at which point the
  * "live" contracts check below becomes theatre, run once at build and
  * never again, and the commit SHA below would freeze at whatever it was
- * during the build that produced the static output. The Node.js runtime
- * (the default for route handlers, named explicitly here so it's not an
- * accident of a default that could change) is required because this route
- * imports lib/ directly, and lib/'s tests and this project's whole premise
- * assume real Node semantics, not the edge runtime's restricted subset.
+ * during the build that produced the static output.
+ *
+ * The `runtime = "nodejs"` line below is no longer load-bearing the way
+ * this comment used to claim. Checked directly against this repo's pinned
+ * Next.js version (16.3.5, see package.json): as of Next.js 16.3, `"edge"`
+ * is a deprecated route-segment config that only emits a warning, and
+ * Node.js is unconditionally the default for route handlers — there is no
+ * longer another runtime a route could silently default into. (Next's own
+ * migration note for the deprecation says exactly this: "The Node.js
+ * runtime is the default, so no replacement is needed" —
+ * https://nextjs.org/docs/messages/edge-runtime-deprecated.) So this
+ * declaration doesn't guard against "an accident of a default that could
+ * change" anymore — that failure mode doesn't exist on this version. It's
+ * kept anyway, purely as explicit, self-documenting proof of intent: this
+ * route imports lib/ directly, and lib/'s tests and this project's whole
+ * premise assume real Node semantics, so a reader shouldn't have to go
+ * find that out by tracing imports.
  */
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
