@@ -267,10 +267,30 @@ delta is shown → execute → the observed delta is captured → `Reconciliatio
 shown greyed out as "available but unused." Second run: before the judge clicks "execute," the demo lets them
 click "inject concurrent change" — a second, invisible actor mutates the same World between simulation and
 execution (a real TOCTOU race, not a scripted lie). The system executes, reconciles, and **live on screen**
-names the exact field that drifted (`stock.reserved: predicted 42, observed 45`), automatically derives and
+names the drifted field, automatically derives and
 applies the `runnable` rollback's recorded `steps` (the inverted deltas, run through the one generic
-`applyDeltas` interpreter — not a bespoke undo routine), and shows the restored World's fingerprint matching
-the pre-action fingerprint hash-for-hash. The recorded `steps` array is also shown, so the judge can see
+`applyDeltas` interpreter — not a bespoke undo routine), and shows that the restored World's data is
+structurally identical to the pre-action data.
+
+> **Two corrections to this paragraph, made after the engine was built and verified. Both were written here
+> before the code existed and both turned out to be wrong; they are corrected rather than quietly satisfied.**
+>
+> **1. The unsliced call reports `reservations`, not `stock.reserved`.** This paragraph originally promised
+> the field name `stock.reserved: predicted 42, observed 45`. In the real scenario two paths drift — the
+> reservation array and the counter — and `reconcile()` reports exactly one fact per call in ascending path
+> order, because that is all the frozen `Reconciliation` type can carry. `reservations` sorts first, so
+> `npm run demo:domains` prints `DRIFTED at "reservations"` for INV-2. The `stock.reserved: 42 → 45` fact is
+> real and reachable, but only by calling `reconcile()` per-path on sliced `Delta[]`s — a technique
+> `lib/reconcile/reconcile.ts`'s own header prescribes for exactly this. `tests/failures/case-1-toctou.test.ts`
+> pins both readings side by side. A demo that showed only the sliced fact, presented as what the engine
+> reported for the action, would be showing a judge something the system did not say.
+>
+> **2. Fingerprint equality is not the proof.** This paragraph originally promised the restored fingerprint
+> "matching the pre-action fingerprint hash-for-hash." `computeFingerprint` is a 32-bit FNV-1a and a real
+> collision exists in this domain's own field — `{reserved: 412789}` and `{reserved: 649192}` both hash to
+> `2ba95242`, pinned in `tests/failures/case-4-hash-collision.test.ts`. So hash equality is necessary but
+> not sufficient. M5 made structural deep-equality the authoritative check (ADR 0004 Decision 6) and reports
+> the fingerprint alongside as corroborating. The demo shows both and says which one is the proof. The recorded `steps` array is also shown, so the judge can see
 the exact data the interpreter executed, not just the claim that something ran. One sentence: *the same
 action, run twice — once where reality matched the simulation and rollback sat unused, once where a
 concurrent write made reality diverge, and the system caught the exact diverged field, derived the exact
