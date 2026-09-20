@@ -56,6 +56,21 @@ const DONE_HTML = new URL("../.genesis/DONE.html", import.meta.url);
  * last cell has no pill at all throws instead of being silently dropped —
  * a guard that can fail open by shrinking its own result set is worse than
  * no guard.
+ *
+ * A first pass at this fix anchored to the last cell and matched the exact
+ * class token, but still used `String.match()` *without* the `g` flag
+ * inside that cell — which returns only the FIRST match. That still picks
+ * a winner when the last cell contains more than one exact-token pill
+ * span, e.g. `<span class="pill fake">wrongstate</span> <span
+ * class="pill todo">todo</span>` reads "wrongstate". Not exploitable in
+ * today's file (the Status column only ever holds one span) — but that is
+ * exactly what was said about title cells before M2's row grew a
+ * `<span class="note">`. So this version goes further: it requires the
+ * last cell's ENTIRE trimmed content (nothing before or after, only
+ * incidental whitespace stripped) to be exactly one pill span, anchored
+ * with `^`/`$`. Two pills, a pill plus stray text, or an empty cell all
+ * fail the full-string match and throw; only whitespace padding around a
+ * single legitimate pill is tolerated.
  */
 function pillsInHtml(html: string): { id: string; state: string }[] {
   // Only rows whose FIRST cell is a milestone id are data rows — this is
@@ -75,11 +90,22 @@ function pillsInHtml(html: string): { id: string; state: string }[] {
     if (lastCell === undefined) {
       throw new Error(`DONE.html row for ${id} has no <td> cells at all: ${row}`);
     }
+    // The cell's inner content (between its own <td> and </td>), with only
+    // incidental whitespace trimmed — everything else must be exactly one
+    // pill span. This is what makes a second pill, or a pill plus stray
+    // text, fail instead of `.match()` silently picking whichever comes
+    // first in the string.
+    const inner = lastCell.replace(/^<td>/, "").replace(/<\/td>$/, "").trim();
     // Exact class token match ("pill" or "pill <status>"), not a prefix —
-    // see the function comment for why a prefix match is exploitable.
-    const pillMatch = lastCell.match(/<span class="pill(?: [a-z]+)?">([a-z]+)<\/span>/);
+    // see the function comment for why a prefix match is exploitable — and
+    // anchored to the WHOLE trimmed cell (^...$), not searched for inside
+    // it, so a second pill or trailing text can't hide next to a real one.
+    const pillMatch = inner.match(/^<span class="pill(?: [a-z]+)?">([a-z]+)<\/span>$/);
     if (!pillMatch) {
-      throw new Error(`DONE.html row for ${id} has no status pill in its last cell: ${lastCell}`);
+      throw new Error(
+        `DONE.html row for ${id} has a malformed status cell — expected exactly one status ` +
+          `pill and nothing else, got: ${JSON.stringify(inner)}`,
+      );
     }
     return { id, state: pillMatch[1]! };
   });
@@ -137,6 +163,56 @@ describe("pillsInHtml (the drift guard's own parser)", () => {
       "<tr><td>M1</td><td>Contracts</td><td>BUILD</td>" +
       "<td><code>npm test -- contracts</code></td><td>L1, L4</td><td>oops, no pill here</td></tr>";
 
-    expect(() => pillsInHtml(noPillRow)).toThrow(/no status pill in its last cell/);
+    expect(() => pillsInHtml(noPillRow)).toThrow(/malformed status cell/);
+  });
+
+  // Attacks run against the "anchor to the last cell" fix itself, after a
+  // verifier found that fix still used a non-global, non-anchored
+  // `.match()` inside the last cell — which returns only the FIRST match,
+  // so a second exact-token pill span earlier in the cell than the real
+  // one would still win. Each case below is a way a future edit could grow
+  // a second thing into the Status cell without anyone intending a lie.
+  const row = (lastCellInner: string) =>
+    "<tr><td>M1</td><td>Contracts</td><td>BUILD</td>" +
+    `<td><code>npm test -- contracts</code></td><td>L1, L4</td><td>${lastCellInner}</td></tr>`;
+
+  it("attack: two pills in the last cell, decoy first — throws rather than picking the first", () => {
+    const html = row('<span class="pill fake">wrongstate</span> <span class="pill todo">todo</span>');
+    expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
+  });
+
+  it("attack: two pills in the last cell, real one first — throws rather than picking the first", () => {
+    // Same bug, opposite order — proves the fix isn't "read the last match"
+    // (which would just move the same failure mode instead of closing it).
+    const html = row('<span class="pill todo">todo</span> <span class="pill fake">wrongstate</span>');
+    expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
+  });
+
+  it("attack: a pill plus stray trailing text in the cell — throws", () => {
+    const html = row('<span class="pill todo">todo</span> (pending review)');
+    expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
+  });
+
+  it("attack: a pill plus stray leading text in the cell — throws", () => {
+    const html = row('see note: <span class="pill todo">todo</span>');
+    expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
+  });
+
+  it("a single pill padded with incidental leading/trailing whitespace still reads correctly", () => {
+    // Whitespace from source formatting is not a decoy — only trimmed,
+    // never allowed to hide a second element.
+    const html = row('   <span class="pill todo">todo</span>   ');
+    expect(pillsInHtml(html)).toEqual([{ id: "M1", state: "todo" }]);
+  });
+
+  it("attack: an empty status cell — throws rather than returning no state", () => {
+    const html = row("");
+    expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
+  });
+
+  it("attack: a status cell that is only whitespace — throws", () => {
+    const html = row("   ");
+    expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
   });
 });
+
