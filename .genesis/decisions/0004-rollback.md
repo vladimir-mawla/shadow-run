@@ -85,7 +85,18 @@ ADR 0001 handed this forward explicitly: `computeFingerprint` is a 32-bit FNV-1a
 - Positive: the fingerprint ceiling ADR 0001 named is not inherited as risk in this milestone's own scope — Decision 6.
 - Negative / cost: the default (`runRollback` with no options) proves a narrower claim than criterion 2's literal wording ("fingerprint equals the pre-action fingerprint") once a concurrent writer is in play — that literal claim is now only asserted, and only made, under the opt-in `assumeNoConcurrentWriter` flag, in the scenario where it is actually true. A reader expecting the strong claim unconditionally must read this ADR to understand why it isn't offered unconditionally.
 - Negative / cost: `verifyStepsAreHonestInversion`, the one always-valid honesty check under concurrent writers, requires retaining `observedDeltas` alongside `Rollback.steps` — something `Rollback`'s own frozen shape does not require of a caller. Whichever milestone or verifier wants this check must retain both by its own discipline.
-- Forward note for M6: domains constructing a `Rollback.runnable` should retain `observedDeltas` (not just the derived `steps`) in whatever audit record they keep, specifically so `verifyStepsAreHonestInversion` is available later — this milestone cannot require it of M6, only recommend it.
+- Forward note for M6 — **this is a requirement, not a preference.** Independent verification built the
+  exploit: a fabricated step `{path:"stock.reserved", before:42, after:41}` applies cleanly against a real
+  post-action world, and `runRollback` with no options returns `status:"restored"` with the value at 41 —
+  the wrong value, reported as success. The default path cannot catch this, by construction, and nothing in
+  the type system forces a caller to look. So **every M6 call site must take one of the two available
+  honesty checks**: `assumeNoConcurrentWriter: true` where no concurrent writer is possible, or an explicit
+  `verifyStepsAreHonestInversion(observedDeltas, steps)` where one is. Taking neither is not a style
+  choice — it is accepting a success report that may be false.
+  To make the second option available at all, domains constructing a `Rollback.runnable` must retain
+  `observedDeltas` alongside the derived `steps` in whatever record they keep; `Rollback`'s frozen shape
+  does not carry them, so M5 cannot enforce this and M6 must do it by discipline. A verifier reviewing M6
+  should treat a call site that takes neither check as a finding.
 - Forward note for M3/M4 merge: `lib/rollback/path.ts` duplicates forward-delta-application logic M3's own `lib/simulate/path.ts` independently implements (M3's own notes flag this). This file is the canonical version per plan §A.4; resolving the duplication is for whichever loop merges M3 and M5, not this one — M3 is on a separate, unmerged branch as this is written, so there is nothing to reconcile against yet.
 
 ## Alternatives rejected (summary, cross-referenced above)
