@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertPlainData, isPlainData, NonPlainDataError, type Json, type World } from "../world.js";
+import { assertPlainData, deepFreezeClone, isPlainData, makeWorld, NonPlainDataError, type Json, type World } from "../world.js";
 import { computeFingerprint } from "../fingerprint.js";
 
 /**
@@ -81,5 +81,209 @@ describe("World.data is plain, serializable data", () => {
     const data: Json = { reserved: 3, tags: ["a", "b"], meta: { ok: true, note: null } };
     const roundTripped = JSON.parse(JSON.stringify(data));
     expect(roundTripped).toEqual(data);
+  });
+
+  /**
+   * L4 verification finding: TypeScript types an object-literal getter by
+   * its RETURN type, so a getter satisfies `Json` with NO cast at all —
+   * wider than the "deliberate `x as Json` cast" gap the file header
+   * originally named. A value whose reads are not guaranteed to agree
+   * breaks this project's "same input, same fingerprint, always" premise
+   * even though it is not a function. See world.ts's file header, point 2.
+   */
+  it("RUNTIME: isPlainData rejects an object with an accessor property (a getter) — no cast needed to defeat the type system", () => {
+    let n = 0;
+    const obj = {
+      get x() {
+        n++;
+        return n;
+      },
+    };
+    const asJson: Json = obj; // compiles with zero type errors — no `as` anywhere.
+    expect(isPlainData(asJson)).toBe(false);
+    expect(n).toBe(0); // rejected via the property descriptor, never by actually invoking the getter.
+  });
+
+  it("RUNTIME: isPlainData rejects a getter nested inside an otherwise-plain object", () => {
+    const nested: Json = { a: 1, b: { get c(): number { return 2; } } as unknown as Json };
+    expect(isPlainData(nested)).toBe(false);
+  });
+
+  it("RUNTIME: isPlainData rejects an accessor property at an array index", () => {
+    const arr: unknown[] = [1, 2, 3];
+    Object.defineProperty(arr, 1, { get: () => 99, enumerable: true, configurable: true });
+    expect(isPlainData(arr as unknown as Json)).toBe(false);
+  });
+
+  /**
+   * KNOWN LIMITATION, documented rather than fixed (see world.ts's file
+   * header, "KNOWN, UNCLOSED GAP"). A `Proxy` controls the answer to every
+   * reflection call `isPlainData` makes (`ownKeys`,
+   * `getOwnPropertyDescriptor`, `getPrototypeOf`, `get`), so it can present
+   * a fabricated, entirely-innocent view of itself while a real
+   * function-valued property remains reachable by name. This is not a bug
+   * in `isPlainData` to fix — it is a real, stated boundary of what a
+   * reflection-based runtime walk can ever prove. Do not weaken this test
+   * or its comment: the walk is fooled here, on purpose, to prove the gap
+   * is real rather than hypothetical.
+   */
+  it("KNOWN LIMITATION: a Proxy can hide a function-valued property from isPlainData's reflection-based walk entirely", () => {
+    const target = { a: 1, run: () => "still runs" };
+    const proxy = new Proxy(target, {
+      ownKeys() {
+        return ["a"]; // hides "run" from every reflection API isPlainData calls.
+      },
+      getOwnPropertyDescriptor(t, prop) {
+        if (prop === "a") return { value: t.a, enumerable: true, configurable: true, writable: true };
+        return undefined; // legal: "run" is configurable on `target`, so a trap may report it absent.
+      },
+    });
+
+    // isPlainData is fooled: it only ever sees key "a", an ordinary number.
+    expect(isPlainData(proxy as unknown as Json)).toBe(true);
+    // Yet the function is really there, reachable by anyone who accesses it directly.
+    expect(typeof (proxy as unknown as { run: () => string }).run).toBe("function");
+  });
+});
+
+describe("makeWorld — the one blessed World constructor", () => {
+  it("constructs a valid World and computes fingerprint from data itself", () => {
+    const world = makeWorld({
+      id: "sku-42",
+      domain: "inventory",
+      version: 1,
+      at: "2026-09-20T00:00:00.000Z",
+      data: { reserved: 3, note: null as string | null },
+    });
+    expect(world.fingerprint).toBe(computeFingerprint({ reserved: 3, note: null }));
+    expect(world.id).toBe("sku-42");
+    expect(world.data.reserved).toBe(3);
+  });
+
+  it("TYPE-LEVEL: makeWorld's input has no fingerprint field — a caller cannot supply a stale or wrong one", () => {
+    const world = makeWorld({
+      id: "x",
+      domain: "d",
+      version: 1,
+      at: "2026-09-20T00:00:00.000Z",
+      data: { a: 1 },
+      // @ts-expect-error — fingerprint is not part of makeWorld's input; it is always computed, never accepted from a caller.
+      fingerprint: "deadbeef",
+    });
+    expect(world).toBeDefined();
+  });
+
+  it("TYPE-LEVEL + RUNTIME: data with a function does not compile, and the runtime guard also rejects it — the same Json constraint World<TState> itself enforces, doubly", () => {
+    expect(() => {
+      // @ts-expect-error — TState is inferred from `data` and must extend Json; a function-typed field is not assignable to Json, so `makeWorld`'s own type parameter cannot be inferred here.
+      makeWorld({ id: "x", domain: "d", version: 1, at: "2026-09-20T00:00:00.000Z", data: { onCancel: () => {} } });
+    }).toThrow(NonPlainDataError);
+  });
+
+  it("RUNTIME: makeWorld throws NonPlainDataError for data that defeats the type system via a cast — the guard is load-bearing here, not merely exported", () => {
+    const smuggled = { onCancel: () => {} } as unknown as Json;
+    expect(() =>
+      makeWorld({ id: "x", domain: "d", version: 1, at: "2026-09-20T00:00:00.000Z", data: smuggled }),
+    ).toThrow(NonPlainDataError);
+  });
+
+  it("RUNTIME: makeWorld throws NonPlainDataError for a getter-bearing value, with no cast at all", () => {
+    const withGetter = { get x() { return 1; } };
+    const asJson: Json = withGetter;
+    expect(() =>
+      makeWorld({ id: "x", domain: "d", version: 1, at: "2026-09-20T00:00:00.000Z", data: asJson }),
+    ).toThrow(NonPlainDataError);
+  });
+
+  /**
+   * L4 verification finding (round 2): makeWorld neither cloned nor froze
+   * `input.data`, so a caller who kept a reference could mutate the
+   * returned World's data after construction, silently staling the
+   * fingerprint. This is the exact reproduction from that report.
+   */
+  it("a caller mutating their own object after construction does NOT affect the returned World — the snapshot is independent of the input", () => {
+    const mutableData = { a: 1 };
+    const world = makeWorld({ id: "x", domain: "d", version: 1, at: "t", data: mutableData });
+    const fingerprintAtConstruction = world.fingerprint;
+
+    mutableData.a = 999; // mutate the caller's own, still-held reference.
+
+    expect(world.data.a).toBe(1); // unaffected — world.data is a separate object.
+    expect(world.data).not.toBe(mutableData); // cloned, not the same reference.
+    expect(world.fingerprint).toBe(fingerprintAtConstruction); // never had a chance to go stale.
+    expect(mutableData.a).toBe(999); // the caller's own copy is untouched by makeWorld — still mutable.
+  });
+
+  it("RUNTIME: mutating World.data directly throws, rather than silently no-op-ing — real failure, not Object.isFrozen alone", () => {
+    // Deliberately NOT a `@ts-expect-error` case: `World.data`'s nested field
+    // is not `readonly` at the type level (only the top-level `data` field
+    // is) — see makeWorld's own doc comment, point 3, on why `readonly` and
+    // `Object.freeze` are different guarantees. This assignment compiles
+    // clean and is expected to throw only at runtime, in this all-ESM,
+    // always-strict-mode codebase.
+    const world = makeWorld({ id: "x", domain: "d", version: 1, at: "t", data: { a: 1 } });
+    expect(() => {
+      world.data.a = 2;
+    }).toThrow(TypeError);
+    expect(world.data.a).toBe(1);
+  });
+
+  it("RUNTIME: freezing is deep — a nested object/array inside World.data also throws on mutation, not just the root", () => {
+    const world = makeWorld({
+      id: "x",
+      domain: "d",
+      version: 1,
+      at: "t",
+      data: { nested: { count: 1 }, list: [1, 2, 3] },
+    });
+    expect(() => {
+      (world.data.nested as { count: number }).count = 2;
+    }).toThrow(TypeError);
+    expect(() => {
+      (world.data.list as number[]).push(4);
+    }).toThrow(TypeError);
+    expect(world.data.nested.count).toBe(1);
+    expect(world.data.list).toEqual([1, 2, 3]);
+  });
+
+  it("a shared (DAG, non-cyclic) reference inside data is cloned once and frozen once — both paths point at the same frozen clone", () => {
+    const shared = { label: "shared" };
+    const mutableData = { a: shared, b: shared };
+    const world = makeWorld({ id: "x", domain: "d", version: 1, at: "t", data: mutableData });
+
+    expect(world.data.a).toBe(world.data.b); // same clone reused, not two independent copies.
+    expect(Object.isFrozen(world.data.a)).toBe(true);
+  });
+});
+
+describe("deepFreezeClone — the reusable deep-clone-and-freeze helper behind makeWorld", () => {
+  it("clones rather than freezing the input in place — the input remains mutable after the call", () => {
+    const input = { a: 1 };
+    const clone = deepFreezeClone(input);
+    expect(clone).not.toBe(input);
+    expect(Object.isFrozen(input)).toBe(false);
+    input.a = 2; // must not throw: the original is untouched by this function.
+    expect(clone.a).toBe(1); // the clone is unaffected by the original's later mutation.
+  });
+
+  it("freezes the clone at every level, including nested arrays", () => {
+    const clone = deepFreezeClone({ a: [{ b: 1 }] } as Json);
+    expect(Object.isFrozen(clone)).toBe(true);
+    expect(Object.isFrozen((clone as { a: unknown }).a)).toBe(true);
+    expect(Object.isFrozen(((clone as { a: unknown[] }).a)[0])).toBe(true);
+  });
+
+  it("does not infinitely recurse or duplicate work on a shared (DAG) reference reachable from two paths", () => {
+    const shared = { x: 1 };
+    const input = { left: shared, right: shared } as unknown as Json;
+    const clone = deepFreezeClone(input) as unknown as { left: object; right: object };
+    expect(clone.left).toBe(clone.right); // cloned once, reused at both paths.
+  });
+
+  it("passes primitives through untouched (they are already immutable, nothing to clone or freeze)", () => {
+    expect(deepFreezeClone(42 as Json)).toBe(42);
+    expect(deepFreezeClone("x" as Json)).toBe("x");
+    expect(deepFreezeClone(null as Json)).toBe(null);
+    expect(deepFreezeClone(true as Json)).toBe(true);
   });
 });
