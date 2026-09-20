@@ -1,37 +1,36 @@
 import { MILESTONES, currentMilestone } from "./milestones";
+import { InventoryDemo } from "../components/InventoryDemo";
 
 /**
- * Placeholder root page — infrastructure only. The interactive demo is
- * M8's job (see .genesis/PLAN.md); this exists purely so the Next.js app
- * shell has a real route to build and serve before then.
+ * Root page. Two things share it: the milestone-status prose that has
+ * lived here since M2 (kept — it is still true, and app/milestones.ts is
+ * still the one place a reader should trust for "how far along is this"),
+ * and, below it, the actual interactive demo this whole project is built
+ * to show (`sim-plan.md` §B, `.genesis/PLAN.md`'s M8 row).
  *
- * Progress is read from app/milestones.ts, never hardcoded into this
- * prose — see that file's comment for why (a hardcoded milestone number
- * on a previous project's public page went stale for two milestones).
- * `doneCount` below is COMPUTED from that module at render time, not a
- * number written here — deliberately, so this comment never has to be
- * edited (and never again risks going stale, the way "as of M2, zero
- * milestones are marked done" did the moment M1 was marked done) just
- * because a milestone's status changed. What still needs saying in prose,
- * because the count alone doesn't say it: nothing on this page should ever
- * imply a working simulator/reconciliation/rollback engine exists — none
- * of lib/simulate, lib/reconcile, or lib/rollback exist yet, regardless of
- * how many milestones are marked done.
+ * THIS COMMENT USED TO SAY "nothing on this page should ever imply a
+ * working simulator/reconciliation/rollback engine exists — none of
+ * lib/simulate, lib/reconcile, or lib/rollback exist yet." That was true
+ * through M8's first, partial pass (presentational components only, no
+ * page wired up) and is FALSE now: M3/M4/M5/M6 are all merged, and
+ * `<InventoryDemo />` below calls `simulate()`, `reconcile()`, and
+ * `runRollback()` for real, client-side, on every click — leaving the old
+ * sentence in place after that stopped being true would be exactly the
+ * kind of comment-contradicts-code mistake this project's own discipline
+ * exists to catch. `doneCount` is still computed from `app/milestones.ts`
+ * at render time rather than hardcoded, for the same "never let a public
+ * page's prose go stale" reason M2's own version of this comment gave.
  */
 export default function Home() {
   const current = currentMilestone();
   const doneCount = MILESTONES.filter((m) => m.status === "done").length;
 
   return (
-    <main style={{ maxWidth: 640, margin: "0 auto", padding: "2rem 1rem" }}>
+    <main className="page">
       <h1>shadow-run</h1>
       <p>
         Simulate before you act: an agent projects the effects of a write before executing it,
         with a rollback path in front of every write.
-      </p>
-      <p>
-        This is a deploy skeleton. No simulator, reconciliation, or rollback engine exists yet —
-        only the typed contracts (M1) and this app shell (M2).
       </p>
       <p>
         <strong>
@@ -56,6 +55,15 @@ export default function Home() {
         <a href="/api/health">/api/health</a> reports the deployed commit SHA and a live check of
         the M1 contracts.
       </p>
+
+      <h2>Live demo — inventory.reserve</h2>
+      <p>
+        Click Simulate, then (optionally) Inject concurrent change one or more times, then Execute.
+        Every button below calls the real engine — <code className="mono">simulate()</code>,{" "}
+        <code className="mono">reconcile()</code>, <code className="mono">runRollback()</code> — client-side,
+        with no network round-trip. Open your browser&rsquo;s Network tab and click through it; nothing fires.
+      </p>
+      <InventoryDemo />
     </main>
   );
 }
