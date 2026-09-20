@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.lib.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".demo-build",
+    "declaration": false,
+    "types": ["node"]
+  },
+  "include": ["lib/**/*.ts", "domains/**/*.ts", "scripts/**/*.ts"],
+  "exclude": ["node_modules", "dist", ".next", "coverage", "lib/**/*.test.ts", "lib/**/__tests__/**", "domains/**/*.test.ts", "domains/**/__tests__/**"]
+}

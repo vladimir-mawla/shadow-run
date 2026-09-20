@@ -12,7 +12,8 @@
     "build": "next build --webpack",
     "start": "next start",
     "typecheck": "tsc -p tsconfig.lib.json --noEmit && tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "demo:domains": "rm -rf .demo-build && tsc -p tsconfig.demo.json && node .demo-build/scripts/demo-domains.js"
   },
   "devDependencies": {
     "@types/node": "24.13.5",
