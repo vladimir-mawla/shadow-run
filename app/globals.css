@@ -1,10 +1,11 @@
 /*
  * Base reset (M2) plus design tokens and component styles for M8's
- * presentational layer (this milestone — see components/**). No page-level
- * layout lives here: app/page.tsx is untouched by this milestone (the
- * pipeline wiring these components will sit in is M6/a later M8 pass's
- * job), so this file owns tokens plus exactly the classes
- * components/*.tsx actually render.
+ * presentational layer AND (this pass) the live page-level pipeline
+ * (`components/InventoryDemo.tsx`, wired into `app/page.tsx`) that drives
+ * it. M8's first, partial pass left `app/page.tsx` untouched because M6's
+ * inventory domain did not exist yet; it exists now, so this file also
+ * owns `.page`/`.world-card`/`.demo-actions`/etc. — the classes the now-
+ * real demo actually renders.
  *
  * Tokens follow decision-engine's own app/globals.css idiom (:root, redefine
  * the SAME names under prefers-color-scheme: dark, never introduce a new
@@ -220,6 +221,183 @@ code.mono {
   font-size: 0.86rem;
   color: var(--text-muted);
   overflow-wrap: anywhere;
+}
+
+/* ── page shell ─────────────────────────────────────────────────────── */
+
+.page {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+}
+
+/* ── inventory demo (components/InventoryDemo.tsx) ─────────────────────
+ * Single column throughout — m8-demo-design.md §8 is explicit that
+ * nothing in this design depends on side-by-side layout to make its
+ * point, so there is no desktop-only multi-column variant to diverge
+ * from the 375px layout at all.
+ */
+.inventory-demo {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.world-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  padding: 0.9rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.world-card__heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: baseline;
+  font-weight: 650;
+}
+
+.world-card__warehouse {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 400;
+}
+
+.world-card__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+}
+
+.world-card__stats > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.world-card__stat-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.world-card__stat-value {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.world-card__fingerprint {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+/* Full-width, stacked buttons — m8-demo-design.md §8's mobile rule, kept
+ * identical on desktop rather than switching to a row layout, since a
+ * viewer clicking these in the wrong order is exactly what disabling the
+ * invalid ones (below) already prevents regardless of width. */
+.demo-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.demo-actions button {
+  width: 100%;
+  padding: 0.6rem 0.9rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: 0.92rem;
+  cursor: pointer;
+}
+
+.demo-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.demo-hint {
+  margin: -0.3rem 0 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.inject-log {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.82rem;
+}
+
+.inject-log__label {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.inject-log ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.inject-log li {
+  overflow-wrap: anywhere;
+}
+
+.effect-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.8rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.effect-card__heading {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.effect-card__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.assumption-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.reconciliation-verdict,
+.rollback-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.untouched-line {
+  margin: 0;
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+.trust-readout {
+  color: var(--text-muted);
+  font-size: 0.85rem;
 }
 
 @media (prefers-reduced-motion: reduce) {
