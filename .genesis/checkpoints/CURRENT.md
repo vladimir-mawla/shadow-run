@@ -5,10 +5,19 @@
   milestone. M1 passed independent (L4) verification; its fixes (`makeWorld`, `deepFreezeClone`, accessor
   rejection, scoped claims — see `m1-fixes`, PR #3) merged to `main` and are now folded into `m2-deploy` via
   `git merge main`. M1 is marked `done` in `.genesis/DONE.html` and `app/milestones.ts` as of this session.
-  This M2 session also addressed two independent-verification findings against the M2 work itself: the
-  drift guard's regex could match the wrong `<span class="pill...">` in a row (fixed to anchor on the
-  row's last cell / exact class), and a stale comment on `app/api/health/route.ts`'s `runtime = "nodejs"`
-  declaration (Next.js 16.3+ no longer supports `edge`, so the "could change" framing was outdated).
+  This M2 session addressed independent-verification findings against the M2 work itself, across two
+  rounds (the second round attacked the first round's own fix and found it incomplete): (1) the drift
+  guard's regex matched the first pill-ish span anywhere in a row instead of the real status pill — fixed
+  to anchor on the row's last `<td>` and match the `pill` class as an exact token, not a prefix; (2) that
+  first fix still used a non-`g` `.match()` inside the last cell, so a SECOND exact-token pill span in that
+  cell would still win by appearing first — fixed by requiring the cell's entire trimmed content to be
+  exactly one pill span (`^`/`$`-anchored), so two pills, a pill plus stray text, or an empty cell all throw
+  instead of picking a winner; (3) a stale comment on `app/api/health/route.ts`'s `runtime = "nodejs"`
+  declaration claimed it guarded against "an accident of a default that could change," which no longer
+  holds on Next.js 16.3+ (`edge` is deprecated, Node.js is the unconditional default) — comment corrected,
+  declaration kept as explicit documentation; (4) `app/page.tsx`'s header comment stated a specific
+  done-count ("as of M2, zero milestones are marked done") that went stale the moment M1 was marked done —
+  replaced with prose describing that the count is computed, not asserting a number that can drift again.
 - target: `app/api/health/**`, `vercel.json` (not added — see below), `next.config.*`, `package.json` only.
   No `lib/**` change of any kind — `lib/contracts/**` stays frozen from M1. No simulate/reconcile/rollback
   engine, no domains, no interactive demo (M3–M8).
@@ -24,9 +33,13 @@
   No `vercel.json` — Next.js's zero-config detection is sufficient (matching decision-engine, which also
   has none), so an empty placeholder file was deliberately not added. No new dependency in `package.json`.
 - verified, not merely claimed: `npm ci` clean (rolldown native binding survives). `npm run typecheck`
-  exits 0 on both tsconfigs. `npm test` runs 8 test files, 44 tests, all passing (the prior 7 files/42
-  tests from M1, plus `app/milestones.test.ts`'s 1 file/2 tests). `npm run build` (`next build --webpack`)
-  succeeds; the build's route summary shows `/api/health` as `ƒ` (dynamic), not statically prerendered.
+  exits 0 on both tsconfigs. `npm test` runs 8 test files, 70 tests, all passing — measured after the
+  `main` merge and both verification-fix rounds, not assumed: `main`'s 7 files/59 tests, plus
+  `app/milestones.test.ts` alone now carrying 11 tests (the original 2, plus the decoy-row and
+  no-pill-at-all tests from round 1, plus round 2's attack suite — two-pills-both-orders, pill-plus-text
+  both directions, whitespace-only, empty cell, and the whitespace-padding-is-fine case). `npm run build`
+  (`next build --webpack`) succeeds; the build's route summary shows `/api/health` as `ƒ` (dynamic), not
+  statically prerendered.
   `npm run dev` + `curl -s -i http://localhost:3000/api/health` returned a real `200` with
   `"commit":"unknown (local dev)"` when `VERCEL_GIT_COMMIT_SHA` was unset, and the real HEAD SHA verbatim
   when it was set for the same run — both paths actually exercised, not assumed from reading the code.
