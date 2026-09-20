@@ -45,7 +45,7 @@ export const MILESTONES: readonly Milestone[] = [
   { id: 6, title: "Domains: four adapters wired end to end", status: "done" },
   { id: 7, title: "The failure suite", status: "done" },
   { id: 8, title: "The interactive demo", status: "done" },
-  { id: 9, title: "Deliverables", status: "planned" },
+  { id: 9, title: "Deliverables", status: "done" },
 ] as const;
 
 /**
