@@ -74,184 +74,84 @@ function pillsInHtml(html: string): { id: string; state: string }[] {
 }
 
 /**
- * Parses the trimmed inner content of a status cell — expected to be
- * EXACTLY ONE well-formed `<span class="pill ...">...</span>` element,
- * nothing before or after it — and returns its status text. Throws
+ * Parses the trimmed inner content of a status cell — required to be
+ * EXACTLY ONE canonical `<span class="pill TOKENS">TEXT</span>` element,
+ * nothing before, after, or nested inside it — and returns TEXT. Throws
  * otherwise.
  *
- * This function's restrictions fall into two categories, and mixing them
- * up is exactly how this guard got tightened past its own job across three
- * rounds of independent verification. The next person changing this
- * should know which bucket a given check is in before touching it.
+ * This is a single anchored regex on purpose, after three earlier
+ * attempts at "parse the structure" (a `<span>`-nesting depth walk, then a
+ * generic-tag depth walk on top of it, plus separate self-closing
+ * detection) each grew more parsing machinery to tolerate nested elements,
+ * and each round of that machinery grew its own hole:
+ *   - round 2: a naive first-match-wins search let a second, decoy pill
+ *     in the same cell win — fixed by anchoring to the whole cell.
+ *   - round 3: relaxed to tolerate ANY nested element (to support a
+ *     decorative icon span nobody had actually asked for), which let a
+ *     nested decoy pill, or even an unrelated nested `<b>`, supply the
+ *     text: `<span class="pill todo"><b>done</b></span>` read as "done"
+ *     with no fake pill needed at all.
+ *   - round 4: tightened to "a nested element may carry no text of its
+ *     own", via a second, generic-tag depth walk with its own self-closing
+ *     detection — which had its own attribute-quoting hole:
+ *     `<span class="pill todo"><i data-x="a/>done</i></span>` read as
+ *     "done", because `[^>]*` inside a tag-matching regex has no concept
+ *     of a quoted attribute containing `>`, so the walk mistook a tag that
+ *     never actually self-closed for one that had.
  *
- * LOAD-BEARING — relaxing any of these reopens a real, demonstrated bypass:
- *   - Exactly ONE top-level element must span the WHOLE trimmed cell, with
- *     nothing else beside it. This is the fix that closed the original
- *     two-pill bypass (round 2): a naive "search for a pill in this cell"
- *     lets a second, decoy pill win by regex match order. Implemented
- *     below by walking `<span>`/`</span>` nesting depth from the outer
- *     tag, rather than a single greedy regex, specifically so two SIBLING
- *     spans (nesting depth returns to 0 before the string ends) are
- *     rejected even though a naive greedy `.*</span>$` would happily
- *     bridge them into one "match".
- *   - Only text found DIRECTLY inside the outer span — never inside any
- *     nested element — may contribute to the status word. A nested
- *     element carrying ANY non-whitespace text is rejected outright, not
- *     silently dropped. This is round 4's fix, and it is load-bearing for
- *     a demonstrated reason, not incidental strictness: allowing nested
- *     elements at all (round 3, to tolerate a decorative icon span) opened
- *     a real bypass, confirmed two ways against this exact function —
- *       `<span class="pill todo"><span class="pill fake">wrongstate</span></span>`
- *         read as {"state":"wrongstate"} (a nested decoy pill wins), and
- *       `<span class="pill todo"><b>done</b></span>`
- *         read as {"state":"done"} even though the REAL pill is "todo" —
- *         no fake pill needed, an unrelated nested `<b>` was enough,
- *         because naive tag-stripping concatenates whatever text survives
- *         with no regard for whose element it came from. Silently
- *         DROPPING nested text (instead of throwing) would still leave
- *         this hole open in the other direction — a row could end up
- *         reporting whatever direct text remains once the nested text is
- *         discarded, which is just as misleading as reporting the wrong
- *         word. Throwing is what keeps a `<b>done</b>` row from parsing as
- *         anything at all.
+ * The common thread across all three holes is that they all live entirely
+ * inside the "tolerate a nested element" machinery. NOBODY HAS ASKED FOR A
+ * DECORATIVE ICON SPAN — it was speculative future convenience from round
+ * 3, and by round 4 it had cost three rounds of holes to support a case
+ * that does not exist. So round 5 removes that machinery entirely rather
+ * than patching it again: nested elements of any kind — empty,
+ * whitespace-only, or otherwise — are simply not part of the shape this
+ * parser accepts. If a decorative child element is ever actually needed,
+ * that is a deliberate, separate change to this pattern, made WITH tests
+ * for all three bypasses above (plus whatever new one it risks), not a
+ * relaxation because the pattern "looks" over-tight.
+ *
+ * LOAD-BEARING, every one of them a demonstrated bypass, not incidental
+ * strictness:
+ *   - No nested elements, at all, under any circumstances. See above.
+ *   - Exactly ONE element must span the WHOLE trimmed cell (the `^`/`$`
+ *     anchors), with nothing else beside it — round 2's fix, for the
+ *     second-pill-wins bypass.
  *   - The class attribute must contain `pill` as an exact, word-bounded
- *     token, not a prefix — this is what rejects `pill-shaped-decoy`.
+ *     token, not a prefix — rejects `pill-shaped-decoy`.
+ *   - The span's opening tag may carry ONLY a `class` attribute — nothing
+ *     else (no `data-*`, no `aria-*`, no stray attribute of any kind).
+ *     There is no legitimate reason for the status pill to carry one, and
+ *     an attribute is exactly the vector round 4's third bypass came
+ *     through (a quoted attribute value containing `>`).
  *   - The extracted status text must be lowercase. This file's own
  *     convention is all-lowercase status words; a stray capital is a typo
  *     worth catching, not a shape this parser should shrug at.
- *   - Malformed markup — an unclosed `<span>`, a self-closing
- *     `<span class="pill todo" />` used AS the pill itself, sibling
- *     elements, a duplicated identical pill — all still throw. These are
- *     genuine breakage, not calibration targets.
+ *   - Any other malformed markup — an unclosed `<span>`, a self-closing
+ *     `<span class="pill todo" />` used AS the pill itself, a trailing or
+ *     leading HTML comment, a duplicated identical pill — all still throw,
+ *     simply by virtue of not matching the one canonical shape below.
  *
- * CALIBRATION — relaxed here because they rejected ordinary future edits
- * with no bearing on drift-guard correctness, verified against this exact
- * file's own conventions:
+ * CALIBRATION — kept from earlier rounds because they were real and none
+ * of them required a nested element:
  *   - Status text may contain digits and hyphens ("in-progress", "wip2"),
  *     not just plain letters — `app/milestones.ts` already uses
- *     "in-progress" as a real `Milestone["status"]` value (round 3).
+ *     "in-progress" as a real `Milestone["status"]` value.
  *   - The pill's class attribute may carry further tokens after `pill`
- *     ("pill ok extra") — a cosmetic CSS modifier has no semantic content
- *     (round 3).
- *   - The pill span may contain a nested element, PROVIDED it carries no
- *     text of its own — e.g. an empty decorative icon span, or one
- *     containing only whitespace. This is what a real icon looks like
- *     (CSS/SVG-driven, not a text node), so the legitimate case from
- *     round 3 survives round 4's tightening; verified directly below
- *     rather than assumed (see "accepts a purely decorative nested
- *     element").
- *
- * DELIBERATELY NOT relaxed, left for the next reader to decide: an HTML
- * comment inside the cell (before, after, or instead of the pill) also
- * throws here. Independent verification rated that mildly too strict but
- * low priority. There's no known legitimate reason for a comment in this
- * specific cell, so it's left strict rather than adding comment-stripping
- * logic for a case nobody has actually hit — but it would be a reasonable,
- * narrow follow-up if that ever changes.
+ *     ("pill ok extra") — a cosmetic CSS modifier has no semantic content.
+ *   - Incidental whitespace padding AROUND the cell's content (outside the
+ *     span) is trimmed by the caller before this function ever sees it.
  */
 function parsePillCellText(cellInner: string, rowId: string): string {
-  const fail = (reason: string): never => {
+  const pillMatch = cellInner.match(/^<span class="pill(?:\s+[a-z0-9-]+)*">([a-z][a-z0-9-]*)<\/span>$/);
+  if (!pillMatch) {
     throw new Error(
-      `DONE.html row for ${rowId} has a malformed status cell — ${reason}: ${JSON.stringify(cellInner)}`,
+      `DONE.html row for ${rowId} has a malformed status cell — expected exactly ` +
+        `<span class="pill TOKENS">TEXT</span> with no nested elements, extra attributes, or ` +
+        `surrounding content, got: ${JSON.stringify(cellInner)}`,
     );
-  };
-
-  const openTagMatch = cellInner.match(/^<span class="pill(?:\s+[a-z0-9-]+)*">/);
-  if (!openTagMatch) {
-    return fail('does not open with a well-formed <span class="pill..."> element');
   }
-
-  // Walk <span>/</span> nesting depth from just past the outer opening tag,
-  // rather than one greedy regex, so a nested (decorative) span is
-  // tolerated but the outer span's REAL close is found precisely — a
-  // sibling pill after it must not be silently absorbed into the "match".
-  // Verification confirmed this walk itself is sound (correctly finds the
-  // outer close, rejects siblings/unclosed/mismatched tags, handles deep
-  // nesting with no runaway) — round 4 did not touch it. The hole was
-  // entirely in what happened to the text AFTER this walk succeeded.
-  let depth = 1;
-  const tagPattern = /<\/?span\b[^>]*>/g;
-  tagPattern.lastIndex = openTagMatch[0].length;
-  let closeIndex = -1;
-  let afterCloseIndex = -1;
-  let match: RegExpExecArray | null;
-  while ((match = tagPattern.exec(cellInner))) {
-    const tag = match[0];
-    if (tag.startsWith("</")) {
-      depth--;
-      if (depth === 0) {
-        closeIndex = match.index;
-        afterCloseIndex = tagPattern.lastIndex;
-        break;
-      }
-    } else if (tag.endsWith("/>")) {
-      return fail("a self-closing <span/> is not well-formed markup here");
-    } else {
-      depth++;
-    }
-  }
-  if (closeIndex === -1) {
-    return fail("its <span> is never closed");
-  }
-  if (afterCloseIndex !== cellInner.length) {
-    return fail("there is content beside the pill's closing </span> (a sibling element or stray text)");
-  }
-
-  const innerHtml = cellInner.slice(openTagMatch[0].length, closeIndex);
-  let text: string;
-  try {
-    text = directTextOnly(innerHtml);
-  } catch (err) {
-    return fail((err as Error).message);
-  }
-  if (!/^[a-z][a-z0-9-]*$/.test(text)) {
-    return fail(`its pill text is not a plain lowercase status word (got ${JSON.stringify(text)})`);
-  }
-  return text;
-}
-
-/**
- * Returns the text found DIRECTLY inside `html` — i.e. NOT inside any
- * nested element, generic HTML tags this time, not just `<span>` — and
- * throws if any nested element carries non-whitespace text of its own.
- *
- * This is what makes a nested decorative icon (empty, or whitespace-only)
- * transparent while rejecting a nested decoy pill or an unrelated nested
- * tag (`<b>done</b>`) whose text happens to look like a valid status —
- * see parsePillCellText's own comment for the two confirmed reproductions
- * this closes. Depth here is independent of, and unrelated to, the
- * `<span>`-specific depth walk in parsePillCellText — that one finds
- * where the OUTER span ends; this one decides which text counts once that
- * boundary is already known.
- */
-function directTextOnly(html: string): string {
-  const tagPattern = /<\/?[a-zA-Z][a-zA-Z0-9-]*(?:\s[^>]*)?>/g;
-  let depth = 0;
-  let lastIndex = 0;
-  let direct = "";
-  let match: RegExpExecArray | null;
-  while ((match = tagPattern.exec(html))) {
-    const textBefore = html.slice(lastIndex, match.index);
-    if (depth === 0) {
-      direct += textBefore;
-    } else if (textBefore.trim() !== "") {
-      throw new Error(`a nested element contains non-whitespace text (${JSON.stringify(textBefore.trim())})`);
-    }
-    const tag = match[0];
-    if (tag.startsWith("</")) {
-      depth--;
-    } else if (!tag.endsWith("/>")) {
-      depth++;
-    }
-    lastIndex = tagPattern.lastIndex;
-  }
-  const trailing = html.slice(lastIndex);
-  if (depth === 0) {
-    direct += trailing;
-  } else if (trailing.trim() !== "") {
-    throw new Error(`a nested element contains non-whitespace text (${JSON.stringify(trailing.trim())})`);
-  }
-  return direct.trim();
+  return pillMatch[1]!;
 }
 
 /** Every (milestone id, pill state) pair in DONE.html's status table. */
@@ -400,59 +300,49 @@ describe("pillsInHtml (the drift guard's own parser)", () => {
     expect(pillsInHtml(html)).toEqual([{ id: "M1", state: "done" }]);
   });
 
-  it("accepts a purely decorative nested element inside the pill (e.g. an icon span)", () => {
-    // The nested span carries no text of its own (a real icon is normally
-    // CSS/SVG-driven, not a text node) — the outer span's TEXT CONTENT is
-    // still exactly "todo" once the nested tag is stripped.
-    const html = row('<span class="pill todo"><span class="icon-dot" aria-hidden="true"></span> todo</span>');
-    expect(pillsInHtml(html)).toEqual([{ id: "M1", state: "todo" }]);
-  });
-
-  // Round 4: independent verification found round 3's calibration (tolerating
-  // ANY nested element, extracting text via blanket tag-stripping) reopened
-  // the exact class of bypass round 2 closed, just moved one level deeper.
-  // Two confirmed reproductions against the real parser, both fixed by
-  // "only the outer span's OWN direct text counts; a nested element with
-  // any non-whitespace text is rejected outright."
-  it("attack: a nested decoy pill — throws instead of reading the fake nested state", () => {
+  // Round 5: nested elements are no longer supported at all — see
+  // parsePillCellText's own comment for why (three straight rounds of
+  // "tolerate nested elements" machinery, three straight bypasses, to
+  // support a decorative-icon case nobody had actually asked for). These
+  // are the three DEMONSTRATED bypasses that motivated removing the
+  // machinery entirely, each run against the real, current parser, plus
+  // the other nested/malformed shapes that must throw for the same reason.
+  it("attack (demonstrated bypass, round 4): a nested decoy pill — throws", () => {
     const html = row('<span class="pill todo"><span class="pill fake">wrongstate</span></span>');
     expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
   });
 
-  it("attack: an unrelated nested tag whose text happens to look like a status — throws, does not read it", () => {
-    // The worst reproduction: no fake pill needed at all. A row whose real
-    // pill is "todo" must not report "done" just because some unrelated
-    // nested <b> contains that word.
+  it("attack (demonstrated bypass, round 4): an unrelated nested <b> whose text looks like a status — throws", () => {
+    // The real pill is "todo"; no fake pill needed at all for this one to
+    // have misled a naive tag-stripping parser into reading "done".
     const html = row('<span class="pill todo"><b>done</b></span>');
     expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
   });
 
-  it("attack: a nested element whose text is whitespace plus a word — throws (not silently trimmed away)", () => {
-    const html = row('<span class="pill todo"><span class="hint">  extra note</span></span>');
+  it("attack (demonstrated bypass, round 4, via attribute quoting): a nested tag with a quoted attribute containing '>' — throws", () => {
+    // The bypass that ended nested-element support entirely: a generic
+    // tag-matching regex's `[^>]*` has no concept of a quoted attribute,
+    // so it stopped at the '>' inside `data-x="a/>done"`, mistook the
+    // truncated match's trailing "/>" for a real self-close, and read the
+    // nested text as direct content. This parser has no tag-depth-walking
+    // machinery left to have that hole — it simply rejects the '<' at all.
+    const html = row('<span class="pill todo"><i data-x="a/>done</i></span>');
     expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
   });
 
-  it("attack: nested text split across two sibling children — throws", () => {
-    const html = row('<span class="pill todo"><i>do</i><i>ne</i></span>');
-    expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
-  });
-
-  it("attack: a nested element containing only the same word as the real status — still throws", () => {
-    // Coincidentally matching the outer's real state must not make this
-    // pass — the rule is "no text in a nested element", full stop, not
-    // "no text that would change the answer."
-    const html = row('<span class="pill todo"><span class="hint">todo</span></span>');
-    expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
-  });
-
-  it("still accepts an empty nested span alongside the real status text (verified directly, not assumed) — the icon case that motivated allowing nesting at all", () => {
+  it("attack: an empty nested element — throws (no nested element is tolerated, not even an empty one)", () => {
     const html = row('<span class="pill todo"><span class="icon-dot"></span>todo</span>');
-    expect(pillsInHtml(html)).toEqual([{ id: "M1", state: "todo" }]);
+    expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
   });
 
-  it("still accepts a nested span containing only whitespace, alongside the real status text", () => {
-    const html = row('<span class="pill todo"><span class="icon-dot"> </span>todo</span>');
-    expect(pillsInHtml(html)).toEqual([{ id: "M1", state: "todo" }]);
+  it("attack: a nested HTML comment — throws", () => {
+    const html = row('<span class="pill todo"><!-- pending review -->todo</span>');
+    expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
+  });
+
+  it("attack: an extra attribute on the pill span itself — throws (only class= is allowed)", () => {
+    const html = row('<span class="pill todo" data-x="y">todo</span>');
+    expect(() => pillsInHtml(html)).toThrow(/malformed status cell/);
   });
 });
 
