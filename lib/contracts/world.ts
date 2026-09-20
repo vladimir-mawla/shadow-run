@@ -206,11 +206,21 @@ export function assertPlainData(value: unknown, context: string): void {
  * choice, not an oversight: freezing the caller's own object would mean
  * `makeWorld({ ..., data: someObject })` silently makes `someObject`
  * permanently immutable everywhere else the caller holds a reference to
- * it — including the extremely common pattern this project's own domain
- * is built around, evolving one working object across a sequence of
- * snapshots (`const before = makeWorld({ ..., data: state }); state.qty--;
- * const after = makeWorld({ ..., data: state })`). Freezing in place would
- * make the second call's mutation throw before it ever happens. Cloning
+ * it. The general principle is enough on its own: a constructor has no
+ * business deciding what a caller may do with an object after handing it
+ * over.
+ *
+ * One candidate pattern this protects — evolving a working object across
+ * a sequence of snapshots (`const before = makeWorld({ ..., data: state });
+ * state.qty--; const after = makeWorld({ ..., data: state })`), where
+ * freezing in place would make the second mutation throw — is a PLAUSIBLE
+ * future shape, not an established requirement. No domain code exists yet,
+ * and the plan does not specify object-identity semantics for it. An
+ * earlier draft of this comment asserted it as settled fact about how this
+ * project's domains work; verification caught that, and it is recorded
+ * here as the conjecture it is. If M6 turns out to construct each snapshot
+ * fresh from a backing resource, this particular argument evaporates and
+ * the general one above still stands. Cloning
  * costs one full traversal-and-copy of `data` per call and means
  * `world.data !== input.data` even though they are deep-equal at the
  * moment of construction — accepted as the right trade for keeping the
