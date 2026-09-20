@@ -5,7 +5,7 @@
   milestone. M1 passed independent (L4) verification; its fixes (`makeWorld`, `deepFreezeClone`, accessor
   rejection, scoped claims — see `m1-fixes`, PR #3) merged to `main` and are now folded into `m2-deploy` via
   `git merge main`. M1 is marked `done` in `.genesis/DONE.html` and `app/milestones.ts` as of this session.
-  This M2 session addressed independent-verification findings against the M2 work itself, across three
+  This M2 session addressed independent-verification findings against the M2 work itself, across four
   rounds (each later round attacked the previous round's own fix rather than taking it on faith): (1) the
   drift guard's regex matched the first pill-ish span anywhere in a row instead of the real status pill —
   fixed to anchor on the row's last `<td>` and match the `pill` class as an exact token, not a prefix; (2)
@@ -21,10 +21,20 @@
   status word with a hyphen or digit (`"in-progress"`, `"wip2"`), an extra cosmetic class token
   (`"pill ok extra"`), and a purely decorative nested icon span inside the pill all threw. Fixed by widening
   the status-text pattern, allowing further class tokens after `pill`, and extracting the pill's TEXT
-  CONTENT (nested tags stripped) instead of requiring bare inner HTML — while keeping the whole-cell,
-  exact-token, and lowercase-only checks intact, since those are what closed the real bypasses in rounds
-  1–2. `parsePillCellText`'s own comment now states explicitly which restrictions are load-bearing and
-  which were calibration, so the next round of tightening doesn't have to rediscover that split.
+  CONTENT (nested tags stripped) instead of requiring bare inner HTML; (6) round 4 found that round 3's
+  "tolerate any nested element" relaxation reopened a real bypass one level deeper — blanket tag-stripping
+  has no concept of WHOSE text it's reading, so `<span class="pill todo"><span class="pill fake">wrongstate</span></span>`
+  read as "wrongstate", and worse, `<span class="pill todo"><b>done</b></span>` read as "done" even though
+  the real pill was "todo", with no fake pill needed at all. Fixed by requiring that only text found
+  DIRECTLY inside the outer span (never inside any nested element) may contribute to the status word; a
+  nested element carrying any non-whitespace text is now rejected outright rather than silently dropped
+  (dropping it would still let the `<b>done</b>` row parse as whatever direct text remained, which is just
+  as misleading). The legitimate icon case survives because a real icon is empty or whitespace-only —
+  verified directly with a test, not assumed. Throughout, the whole-cell anchor, exact class token, and
+  lowercase-only checks were never touched — those are what closed the real bypasses and stayed
+  load-bearing across every round. `parsePillCellText`'s own comment states explicitly, per restriction,
+  which bucket (load-bearing vs. calibration) it's in and why, so the next round of tightening doesn't have
+  to rediscover that split from scratch.
 - target: `app/api/health/**`, `vercel.json` (not added — see below), `next.config.*`, `package.json` only.
   No `lib/**` change of any kind — `lib/contracts/**` stays frozen from M1. No simulate/reconcile/rollback
   engine, no domains, no interactive demo (M3–M8).
@@ -40,15 +50,18 @@
   No `vercel.json` — Next.js's zero-config detection is sufficient (matching decision-engine, which also
   has none), so an empty placeholder file was deliberately not added. No new dependency in `package.json`.
 - verified, not merely claimed: `npm ci` clean (rolldown native binding survives). `npm run typecheck`
-  exits 0 on both tsconfigs. `npm test` runs 8 test files, 78 tests, all passing — measured fresh after the
-  `main` merge and all three verification-fix rounds, not assumed: `main`'s 7 files/59 tests, plus
-  `app/milestones.test.ts` alone now carrying 19 tests (the original 2; the decoy-row and no-pill-at-all
+  exits 0 on both tsconfigs. `npm test` runs 8 test files, 85 tests, all passing — measured fresh after the
+  `main` merge and all four verification-fix rounds, not assumed: `main`'s 7 files/59 tests, plus
+  `app/milestones.test.ts` alone now carrying 26 tests (the original 2; the decoy-row and no-pill-at-all
   tests from round 1; round 2's attack suite — two-pills-both-orders, pill-plus-text both directions,
   whitespace-only, empty cell, whitespace-padding-is-fine; round 3's still-rejected set — unclosed span,
   self-closing pill span, duplicated identical pill, uppercase status text — plus its newly-accepted set —
-  hyphenated status, digit in status, extra class token, nested icon span). `npm run build`
-  (`next build --webpack`) succeeds; the build's route summary shows `/api/health` as `ƒ` (dynamic), not
-  statically prerendered.
+  hyphenated status, digit in status, extra class token, nested icon span; round 4's must-throw set —
+  nested decoy pill, nested `<b>done</b>`, nested whitespace-plus-word, nested text split across siblings,
+  a nested element matching the real status word — plus its still-must-pass set, verified directly —
+  empty nested icon span, whitespace-only nested icon span, both alongside real status text). `npm run
+  build` (`next build --webpack`) succeeds; the build's route summary shows `/api/health` as `ƒ`
+  (dynamic), not statically prerendered.
   `npm run dev` + `curl -s -i http://localhost:3000/api/health` returned a real `200` with
   `"commit":"unknown (local dev)"` when `VERCEL_GIT_COMMIT_SHA` was unset, and the real HEAD SHA verbatim
   when it was set for the same run — both paths actually exercised, not assumed from reading the code.
