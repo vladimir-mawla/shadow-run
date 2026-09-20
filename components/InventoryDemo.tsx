@@ -3,7 +3,7 @@
 import { useEffect, useState, type JSX } from "react";
 import { simulate, type Action } from "../lib/simulate/index";
 import { reconcile, updateTrust, makeInitialTrust, DEFAULT_TRUST_THRESHOLD } from "../lib/reconcile/index";
-import { runRollback, type RollbackOutcome } from "../lib/rollback/index";
+import { runRollback, verifyStepsAreHonestInversion, type RollbackOutcome } from "../lib/rollback/index";
 import type {
   AssumptionKind,
   Delta,
@@ -40,12 +40,15 @@ import { RestorationVerdict } from "./RestorationVerdict";
  * branches on `reconciliation.status`, the real output of a real
  * `reconcile()` call, never on "was I raced."
  *
- * THE `assumeNoConcurrentWriter` QUESTION, ANSWERED FOR THIS CALL SITE
- * (ADR 0004 Decision 7's forward note; `domains/inventory/cases.ts`'s own
- * comment on INV-2 answers it for `scripts/demo-domains.ts`'s synchronous
+ * THE `assumeNoConcurrentWriter` QUESTION, ANSWERED FOR THIS CALL SITE —
+ * AND WHY THAT ANSWER IS NOT THE ONLY THING THIS FILE RELIES ON (ADR 0004
+ * Decision 7's forward note; `domains/inventory/cases.ts`'s own comment on
+ * INV-2 answers this for `scripts/demo-domains.ts`'s synchronous
  * `runCase()`, but that argument does not automatically transfer to a
- * React event handler, and this file does not assume it does without
- * saying why):
+ * React event handler, and an earlier version of this file leaned on a
+ * single structural argument to make it transfer anyway — exactly the
+ * shape of proof this project's own history (five bypasses on one guard at
+ * M2, a sixth on the import allowlist since) has already shown fails):
  *
  * `runCase()` is one synchronous JS function call — nothing can write to
  * `inv-SKU-77021` between its own `applyReal()` and its own `runRollback()`
@@ -57,25 +60,50 @@ import { RestorationVerdict } from "./RestorationVerdict";
  * the verdict), the browser's event loop WOULD get a chance to process a
  * queued click on "Inject" — which this design deliberately keeps
  * clickable — in exactly the window `assumeNoConcurrentWriter` claims is
- * empty. That would make the flag a LIE, not a simplification.
+ * empty.
  *
  * So `handleExecute` below keeps the entire
  * `applyReal → netDeltas → reconcile → proposeRollback → runRollback`
  * sequence in ONE synchronous call, with zero `await`/`setTimeout`/promise
  * boundary anywhere inside it, and calls `setState` only once everything —
- * including `runRollback`'s own result — has already been computed. A
- * click on "Inject" that the user fires while this handler is running
- * cannot be processed by the browser until this function returns (the
- * ordinary run-to-completion guarantee every JS event handler gets, not a
- * React-specific one) — by which point rollback has already run against
- * the world exactly as it existed at the moment Execute was pressed. The
- * half-second delay (`revealed`, below) therefore only ever gates WHEN the
- * already-computed result is revealed on screen, never WHEN it is computed
- * — the same separation of "compute now, reveal later" that keeps the
- * flag honest. This is a real, load-bearing implementation constraint this
- * file has to maintain, not an incidental detail: moving the
- * `runRollback` call into a `useEffect` later would silently break the
- * argument above.
+ * including `runRollback`'s own result — has already been computed. This
+ * remains true today, and it is WHY `assumeNoConcurrentWriter: true` is
+ * honest to pass here: nothing else can write to this `World.id` in the
+ * window the flag talks about, for the same run-to-completion reason
+ * `runCase()` gets it for free.
+ *
+ * BUT THIS FILE DOES NOT REST THE WHOLE CLAIM ON THAT ONE ARGUMENT holding
+ * forever. `handleExecute` also calls `verifyStepsAreHonestInversion`
+ * (`lib/rollback/run-rollback.ts`) — ADR 0004 Decision 7's OTHER honesty
+ * check, which is `deepEqual`-over-data, never looks at `World` state at
+ * all, and is valid REGARDLESS of whether a concurrent writer exists or
+ * whether the atomicity argument above still holds. The two checks buy
+ * different things and fail differently, on purpose:
+ *
+ *   - `assumeNoConcurrentWriter: true` buys the STRONGER claim —
+ *     `fullWorldRestorationVerified`, the whole-`World` `deepEqual` this
+ *     demo's headline fingerprint-equality moment depends on. It is
+ *     honest only as long as the synchronous-call-stack argument above
+ *     holds. If a future edit ever moved `runRollback` behind a real
+ *     yield point, this flag would start asserting something no longer
+ *     true.
+ *   - `verifyStepsAreHonestInversion` buys a NARROWER, ALWAYS-true claim —
+ *     that `rollback.steps` really is `buildRollbackSteps(observedDeltas)`,
+ *     i.e. the recorded plan is not fabricated or miscalculated — and
+ *     this claim's validity does NOT depend on the atomicity argument at
+ *     all, so it keeps working even if that argument is silently broken
+ *     later.
+ *
+ * The point of calling both is exactly ADR 0004 Decision 7's own framing:
+ * if the atomicity argument above ever stops holding (a refactor, not a
+ * concurrent write this demo can produce today), the STRONGER claim
+ * degrades or goes wrong — `runRollback`'s own internal cheap-consistency
+ * check and its `dataMatchesExactly` check both already fail closed
+ * toward `"dishonest"` rather than a false `"restored"` (see
+ * `run-rollback.ts`'s own header) — while `verifyStepsAreHonestInversion`
+ * keeps reporting its own, narrower, still-true fact regardless. Two
+ * checks that fail differently, rather than one clever argument a single
+ * refactor can silently void.
  *
  * WHY `handleExecute` CALLS `reconcile()` TWICE — A REAL FINDING, NOT A
  * WORKAROUND (surfaced by M7's own TOCTOU test against this merged domain,
@@ -166,6 +194,15 @@ interface RunResult {
    */
   readonly stockReservedReconciliation: Reconciliation;
   readonly rollback: Rollback;
+  /**
+   * `verifyStepsAreHonestInversion(observedDeltas, rollback.steps)` — ADR
+   * 0004 Decision 7's always-valid check, computed whenever `rollback` is
+   * `runnable`, regardless of whether it actually got executed. `null`
+   * only for `rollback.kind === "unavailable"` (nothing to check). See
+   * this file's header for why this is called alongside, never instead
+   * of, `assumeNoConcurrentWriter`.
+   */
+  readonly honestInversionVerified: boolean | null;
   readonly rollbackOutcome: RollbackOutcome<StockState> | null;
   readonly trustBefore: SimulatorTrust;
   readonly trustAfter: SimulatorTrust;
@@ -326,13 +363,21 @@ export function InventoryDemo(): JSX.Element {
       observedForReconciliation.filter((delta) => delta.path === "stock.reserved"),
     );
     const rollback = inventoryDomain.proposeRollback(observedDeltas, worldBeforeThisWrite);
+    // ADR 0004 Decision 7's always-valid check — computed whenever there
+    // are steps to check, independent of whether the rollback below
+    // actually runs, and independent of the atomicity argument the
+    // assumeNoConcurrentWriter call depends on. See file header.
+    const honestInversionVerified =
+      rollback.kind === "runnable" ? verifyStepsAreHonestInversion(observedDeltas, rollback.steps) : null;
 
     let rollbackOutcome: RollbackOutcome<StockState> | null = null;
     let finalWorld = worldAfterOwnWrite;
     if (reconciliation.status !== "confirmed") {
       // domains/inventory/cases.ts's own INV-2 policy, run for real here:
       // "execute" + "assume-no-concurrent-writer" — honest for THIS call
-      // site for the reason this file's header argues at length.
+      // site for the reason this file's header argues at length, and
+      // backed by honestInversionVerified above as the second, always-
+      // valid check per ADR 0004 Decision 7 rather than resting on one.
       rollbackOutcome = runRollback(rollback, worldAfterOwnWrite, worldBeforeThisWrite, { assumeNoConcurrentWriter: true });
       if (rollbackOutcome.status === "restored") {
         finalWorld = rollbackOutcome.world;
@@ -349,6 +394,7 @@ export function InventoryDemo(): JSX.Element {
       reconciliation,
       stockReservedReconciliation,
       rollback,
+      honestInversionVerified,
       rollbackOutcome,
       trustBefore: trust,
       trustAfter,
@@ -507,6 +553,13 @@ export function InventoryDemo(): JSX.Element {
                       ))}
                     </div>
                   </details>
+                )}
+
+                {result.honestInversionVerified !== null && (
+                  <StatusChip
+                    tone={result.honestInversionVerified ? "positive" : "negative"}
+                    label={`honesty check (verifyStepsAreHonestInversion): ${result.honestInversionVerified ? "PASS" : "FAIL"}`}
+                  />
                 )}
 
                 {revealed && result.rollbackOutcome && (
