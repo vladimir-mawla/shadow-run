@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
 
 /**
  * INVARIANT: `lib/simulate/**` NEVER reaches an LLM, the network, or a
@@ -74,10 +74,55 @@ import { join, relative } from "node:path";
  * Both are proven in the "false-positive discipline" block below,
  * including this file's OWN sanity-test strings, the exact hazard
  * `framework-free.test.ts`'s header names by name.
+ *
+ * FIX (independent verification, first round): THE ALLOWLIST ORIGINALLY
+ * CHECKED SYNTAX, NOT CONTAINMENT — a real, confirmed exploit, not a
+ * theoretical one. `isAllowedSpecifier` (as first written) only tested
+ * whether a specifier's TEXT started with `./` or `../`; it never asked
+ * where that specifier actually RESOLVES to on disk. So this passed
+ * clean, from a file located at `lib/simulate/adapter.ts`:
+ *
+ *     import openai from "../../node_modules/next/package.json";
+ *
+ * `../../node_modules/next/package.json`, resolved against
+ * `lib/simulate/`'s real location, lands squarely inside this repo's
+ * real `node_modules/` — confirmed with `existsSync` in this file's own
+ * regression test below, not assumed. A relative specifier can walk
+ * arbitrarily far up the tree via repeated `../` and land ANYWHERE,
+ * including inside `node_modules` (any LLM SDK a future milestone
+ * installs), a sibling milestone's own frozen directory, or outside the
+ * repository entirely. Checking specifier TEXT was exactly the kind of
+ * approximation this file's own header already warns against — the same
+ * "cleverly parse a flexible surface" failure mode as `app/
+ * milestones.test.ts`'s five-times-bypassed drift guard, one property
+ * over: syntax was flexible, containment is the actual, unambiguous
+ * property that matters.
+ *
+ * THE FIX: `resolvesInsideAllowedRoots(fromFile, specifier)` replaces
+ * `isAllowedSpecifier(specifier)`. It resolves the specifier against the
+ * IMPORTING FILE's real directory (`node:path`'s `resolve`, which fully
+ * normalizes `..` segments — never a string-counting depth heuristic,
+ * which this repo's own drift-guard history already shows is not robust)
+ * and checks the resulting absolute path against an explicit, closed list
+ * of allowed roots: `lib/simulate/` itself, and `lib/contracts/` (the one
+ * frozen, already-audited dependency this milestone is allowed to use —
+ * every real import in this codebase's own source targets one of these
+ * two). Anything resolving outside both — `node_modules`, a sibling
+ * milestone's `lib/reconcile`/`lib/rollback`, the repository root, outside
+ * the repository — is rejected, regardless of how many `../` segments the
+ * specifier's TEXT contains or how it's formatted. Prefix comparison uses
+ * `root + sep` (never a bare `startsWith(root)`), so a sibling directory
+ * that merely starts with the same characters — `lib/simulate-experimental`
+ * against `lib/simulate` — cannot pass by string-prefix coincidence.
  */
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
 const SIMULATE_ROOT = join(REPO_ROOT, "lib", "simulate");
+const CONTRACTS_ROOT = join(REPO_ROOT, "lib", "contracts");
+/** The closed list of directories a `lib/simulate/**` source file may resolve an import into — itself, and the one frozen dependency it is allowed to use. See the file header's "FIX" paragraph for why containment against THIS list, not specifier syntax, is the actual property being checked. */
+const ALLOWED_ROOTS: readonly string[] = [SIMULATE_ROOT, CONTRACTS_ROOT];
+/** A representative real file location, used throughout this file's synthetic (no-real-file-needed) specifier checks below — `resolve()` is pure path arithmetic and does not require `adapter.ts` to be the file actually being checked. */
+const FROM_ADAPTER = join(SIMULATE_ROOT, "adapter.ts");
 
 function listNonTestSourceFiles(dir: string): string[] {
   const files: string[] = [];
@@ -204,9 +249,22 @@ function tokenize(source: string): { specifiers: readonly FoundSpecifier[]; bare
   return { specifiers, bareFetchCalls };
 }
 
-/** A specifier is allowed if and only if it is relative (`./...` or `../...`) — see file header for why this is an allowlist, not an enumerated denylist. Every bare/absolute specifier — `node:fs`, `fs`, `openai`, `node-fetch`, `react`, a scoped package, anything not starting with a dot — is forbidden by this one rule, with no per-package list to keep current. */
-function isAllowedSpecifier(specifier: string): boolean {
-  return specifier.startsWith("./") || specifier.startsWith("../");
+/**
+ * A specifier is allowed if and only if (1) it is syntactically relative
+ * (`./...` or `../...` — a bare specifier like `"openai"` or `"node:fs"`
+ * is rejected outright here, BEFORE any path resolution: `resolve()`
+ * would otherwise happily treat a bare string as relative-to-`fromFile`
+ * too, which is not how Node's real module resolution treats a bare
+ * specifier, and would be the wrong question to ask of one anyway) AND
+ * (2) resolving it against `fromFile`'s real directory lands inside one
+ * of `ALLOWED_ROOTS` — see the file header's "FIX" paragraph for the
+ * exact exploit this containment check exists to close, which a syntax-
+ * only check (`specifier.startsWith("./")`) already missed once.
+ */
+function resolvesInsideAllowedRoots(fromFile: string, specifier: string): boolean {
+  if (!specifier.startsWith("./") && !specifier.startsWith("../")) return false;
+  const resolved = resolve(dirname(fromFile), specifier);
+  return ALLOWED_ROOTS.some((root) => resolved === root || resolved.startsWith(root + sep));
 }
 
 interface SpecifierOffender {
@@ -227,7 +285,7 @@ function scan(): { specifierOffenders: SpecifierOffender[]; fetchOffenders: Fetc
     const source = readFileSync(file, "utf8");
     const { specifiers, bareFetchCalls } = tokenize(source);
     for (const { specifier, line } of specifiers) {
-      if (!isAllowedSpecifier(specifier)) {
+      if (!resolvesInsideAllowedRoots(file, specifier)) {
         specifierOffenders.push({ file: relative(REPO_ROOT, file), line, specifier });
       }
     }
@@ -239,14 +297,16 @@ function scan(): { specifierOffenders: SpecifierOffender[]; fetchOffenders: Fetc
 }
 
 describe("lib/simulate/** never reaches an LLM, the network, or a Node built-in", () => {
-  it("every import/require specifier in non-test source is relative — no bare package, no node: built-in, no absolute path", () => {
+  it("every import/require specifier in non-test source is relative AND resolves inside lib/simulate/ or lib/contracts/ — no bare package, no node: built-in, no absolute path, no relative escape into node_modules or a sibling milestone", () => {
     const { specifierOffenders } = scan();
     if (specifierOffenders.length > 0) {
       const report = specifierOffenders.map((o) => `${o.file}:${o.line}: imports "${o.specifier}"`).join("\n");
       throw new Error(
-        `lib/simulate/** may only import via a relative specifier (./ or ../) — found ${specifierOffenders.length} ` +
-          `non-relative import(s), which is exactly how an LLM client, a network library, or a Node built-in would ` +
-          `enter this milestone's frozen boundary:\n${report}`,
+        `lib/simulate/** may only import a specifier that resolves inside lib/simulate/ or lib/contracts/ — found ` +
+          `${specifierOffenders.length} offending import(s). This is exactly how an LLM client, a network library, ` +
+          `or a Node built-in could enter this milestone's frozen boundary — either directly (a bare specifier) or ` +
+          `via a relative path that merely LOOKS contained but actually walks out via "../" into node_modules or ` +
+          `elsewhere:\n${report}`,
       );
     }
     expect(specifierOffenders).toEqual([]);
@@ -261,23 +321,54 @@ describe("lib/simulate/** never reaches an LLM, the network, or a Node built-in"
     expect(fetchOffenders).toEqual([]);
   });
 
-  describe("sanity: the allowlist rule itself", () => {
-    it("accepts relative specifiers", () => {
-      expect(isAllowedSpecifier("./path.js")).toBe(true);
-      expect(isAllowedSpecifier("../contracts/index.js")).toBe(true);
+  describe("sanity: the containment rule itself", () => {
+    it("accepts relative specifiers that resolve inside lib/simulate/ itself", () => {
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "./path.js")).toBe(true);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "./action.js")).toBe(true);
     });
 
-    it("rejects every non-relative shape, with no enumeration needed", () => {
-      expect(isAllowedSpecifier("node:fs")).toBe(false);
-      expect(isAllowedSpecifier("fs")).toBe(false);
-      expect(isAllowedSpecifier("openai")).toBe(false);
-      expect(isAllowedSpecifier("@anthropic-ai/sdk")).toBe(false);
-      expect(isAllowedSpecifier("node-fetch")).toBe(false);
-      expect(isAllowedSpecifier("react")).toBe(false);
+    it("accepts a relative specifier that resolves into lib/contracts/ — the one frozen dependency this milestone is allowed to use", () => {
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "../contracts/index.js")).toBe(true);
+    });
+
+    it("rejects every non-relative (bare/absolute) shape outright, with no enumeration needed", () => {
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "node:fs")).toBe(false);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "fs")).toBe(false);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "openai")).toBe(false);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "@anthropic-ai/sdk")).toBe(false);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "node-fetch")).toBe(false);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "react")).toBe(false);
       // A package nobody on this project has ever heard of — the exact
       // case an enumerated denylist can never cover, and this rule
       // rejects it anyway, for free, because it isn't relative.
-      expect(isAllowedSpecifier("some-llm-sdk-invented-tomorrow")).toBe(false);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "some-llm-sdk-invented-tomorrow")).toBe(false);
+    });
+
+    it("EXPLOIT REGRESSION (HIGH-2, independent verification): a SYNTACTICALLY relative specifier that resolves outside both allowed roots, into the real node_modules/, is rejected", () => {
+      const specifier = "../../node_modules/next/package.json";
+      const resolved = resolve(dirname(FROM_ADAPTER), specifier);
+
+      // Confirm this is not a hypothetical: the escape really does land
+      // on a real path in this actual repository, exactly as
+      // independent verification confirmed with its own `existsSync`
+      // check.
+      expect(existsSync(resolved)).toBe(true);
+      expect(resolved.startsWith(SIMULATE_ROOT + sep)).toBe(false);
+      expect(resolved.startsWith(CONTRACTS_ROOT + sep)).toBe(false);
+
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, specifier)).toBe(false);
+    });
+
+    it("rejects an escape into a SIBLING milestone's own frozen directory (e.g. a future lib/rollback/), not just node_modules", () => {
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "../rollback/apply-deltas.js")).toBe(false);
+    });
+
+    it("does not fall for a sibling directory that merely shares lib/simulate's name as a string prefix (e.g. a hypothetical lib/simulate-experimental/)", () => {
+      const fakeSiblingFile = join(REPO_ROOT, "lib", "simulate-experimental", "evil.ts");
+      // Importing FROM inside a same-prefixed sibling should not be
+      // treated as importing from inside lib/simulate/ itself — this
+      // guards the `root + sep` comparison, not `startsWith(root)`.
+      expect(resolvesInsideAllowedRoots(fakeSiblingFile, "./evil-payload.js")).toBe(false);
     });
   });
 
@@ -286,25 +377,25 @@ describe("lib/simulate/** never reaches an LLM, the network, or a Node built-in"
       const source = ["import {", "  readFileSync,", "  writeFileSync,", '} from "node:fs";'].join("\n");
       const { specifiers } = tokenize(source);
       expect(specifiers).toEqual([{ specifier: "node:fs", line: 4 }]);
-      expect(isAllowedSpecifier(specifiers[0]!.specifier)).toBe(false);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, specifiers[0]!.specifier)).toBe(false);
     });
 
     it("a template-literal dynamic import with no interpolation", () => {
       const { specifiers } = tokenize("const mod = await import(`openai`);");
       expect(specifiers).toEqual([{ specifier: "openai", line: 1 }]);
-      expect(isAllowedSpecifier(specifiers[0]!.specifier)).toBe(false);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, specifiers[0]!.specifier)).toBe(false);
     });
 
     it("a bare require()", () => {
       const { specifiers } = tokenize('const http = require("node:http");');
       expect(specifiers).toEqual([{ specifier: "node:http", line: 1 }]);
-      expect(isAllowedSpecifier(specifiers[0]!.specifier)).toBe(false);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, specifiers[0]!.specifier)).toBe(false);
     });
 
     it("a side-effect-only bare import", () => {
       const { specifiers } = tokenize('import "some-polyfill";');
       expect(specifiers).toEqual([{ specifier: "some-polyfill", line: 1 }]);
-      expect(isAllowedSpecifier(specifiers[0]!.specifier)).toBe(false);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, specifiers[0]!.specifier)).toBe(false);
     });
 
     it("fetch called after whitespace, and fetch called with a preceding newline (both real reformatting shapes)", () => {
@@ -322,7 +413,7 @@ describe("lib/simulate/** never reaches an LLM, the network, or a Node built-in"
     it("does NOT flag a relative import whose filename merely contains the word 'fetch'", () => {
       const { specifiers } = tokenize('import { helper } from "./fetchable-helpers.js";');
       expect(specifiers).toEqual([{ specifier: "./fetchable-helpers.js", line: 1 }]);
-      expect(isAllowedSpecifier(specifiers[0]!.specifier)).toBe(true);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, specifiers[0]!.specifier)).toBe(true);
     });
 
     it("does NOT flag `obj.fetch(...)` — a property access, not the global function", () => {
@@ -360,7 +451,7 @@ describe("lib/simulate/** never reaches an LLM, the network, or a Node built-in"
     it("does not false-positive on ordinary relative imports already used throughout this milestone", () => {
       const specifiers = ["./path.js", "../contracts/index.js", "./action.js", "./adapter.js"];
       for (const specifier of specifiers) {
-        expect(isAllowedSpecifier(specifier)).toBe(true);
+        expect(resolvesInsideAllowedRoots(FROM_ADAPTER, specifier)).toBe(true);
       }
     });
   });
