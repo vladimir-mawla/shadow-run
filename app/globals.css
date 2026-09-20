@@ -1,9 +1,57 @@
 /*
- * Minimal reset — infrastructure only. This project's UI (M8) is not built
- * yet; this file exists so the App Router has a stylesheet to import and
- * `npm run typecheck` / `npm run build` have a real app/ tree to check,
- * ahead of M2 adding app/api/health/**.
+ * Base reset (M2) plus design tokens and component styles for M8's
+ * presentational layer (this milestone — see components/**). No page-level
+ * layout lives here: app/page.tsx is untouched by this milestone (the
+ * pipeline wiring these components will sit in is M6/a later M8 pass's
+ * job), so this file owns tokens plus exactly the classes
+ * components/*.tsx actually render.
+ *
+ * Tokens follow decision-engine's own app/globals.css idiom (:root, redefine
+ * the SAME names under prefers-color-scheme: dark, never introduce a new
+ * token only in the dark block) — borrowed for its discipline, not its
+ * subject matter: this project has no decision "outcomes," so the tone
+ * family below is named for what THIS project checks (a restoration
+ * verdict, an assumption's status), not copied verbatim from the sibling's
+ * outcome-execute/ask/defer/... set.
  */
+:root {
+  --font-mono: "SF Mono", "Berkeley Mono", ui-monospace, "Cascadia Code", "Roboto Mono", Consolas, monospace;
+
+  --bg: #f5f5f3;
+  --bg-raised: #ffffff;
+  --bg-sunken: #ebebe8;
+  --text: #17181a;
+  --text-muted: #55585e;
+  --border: #d9dad6;
+
+  --status-positive: #1c7a4f;
+  --status-positive-bg: #e6f3ea;
+  --status-negative: #8c1f2b;
+  --status-negative-bg: #f6e3e2;
+  --status-neutral: #55585e;
+  --status-neutral-bg: #ececea;
+
+  --radius: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14151a;
+    --bg-raised: #1b1d23;
+    --bg-sunken: #101116;
+    --text: #eceef2;
+    --text-muted: #a5a9b3;
+    --border: #2c2f37;
+
+    --status-positive: #52cc8f;
+    --status-positive-bg: #103224;
+    --status-negative: #f0918f;
+    --status-negative-bg: #3a1618;
+    --status-neutral: #a7abb3;
+    --status-neutral-bg: #232529;
+  }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -14,5 +62,174 @@ html {
 
 body {
   margin: 0;
+  background: var(--bg);
+  color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+code.mono {
+  background: var(--bg-sunken);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  font-size: 0.92em;
+}
+
+/* ── delta row (components/DeltaRow.tsx) ───────────────────────────────
+ * Two lines, always — path+kind above, before→after (or the reconciled
+ * claim text) below — never one line that shrinks to fit. See
+ * m8-demo-design.md §8: at 375px, a monospace "path: before → after (kind)"
+ * line does not reliably fit, and the numbers are the load-bearing content,
+ * so wrapping to a second line (a CSS block stack, not a JS breakpoint
+ * check) beats shrinking the font until it clips.
+ */
+.delta-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.5rem 0.65rem;
+  background: var(--bg-sunken);
+  border-radius: 6px;
+  font-size: 0.86rem;
+}
+
+.delta-row__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.delta-row__path {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.delta-row__kind {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.delta-row__value {
+  overflow-wrap: anywhere;
+}
+
+/* ── fingerprint pair (components/FingerprintPair.tsx) ──────────────────
+ * Side by side on desktop; wraps to a stacked column at narrow widths via
+ * flex-wrap alone — no max-width media query needed, and no value is ever
+ * truncated (m8-demo-design.md §8: 8 hex characters always fits).
+ */
+.fingerprint-pair {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.fingerprint-pair__item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.fingerprint-pair__label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.fingerprint-pair__value {
+  font-size: 0.92rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* ── status chip (components/StatusChip.tsx) ────────────────────────────
+ * The primary restoration badge (RestorationVerdict.tsx) renders at this
+ * same weight as any other text on the card — deliberately not shrunk,
+ * per the "don't restate limits more strongly" note's other direction:
+ * under-selling a true signal is its own dishonesty.
+ */
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  font-weight: 650;
+  font-size: 0.95rem;
+  line-height: 1.2;
+}
+
+.status-chip--positive {
+  color: var(--status-positive);
+  background: var(--status-positive-bg);
+}
+
+.status-chip--negative {
+  color: var(--status-negative);
+  background: var(--status-negative-bg);
+}
+
+.status-chip--neutral {
+  color: var(--status-neutral);
+  background: var(--status-neutral-bg);
+}
+
+/* ── restoration verdict (components/RestorationVerdict.tsx) ────────────
+ * The fingerprint corroborating-line sits directly under the badge at
+ * normal text size (not smaller) — see the component's own header comment
+ * for why. The disclosure is a native <details>/<summary>, permanently
+ * visible, never hidden behind a hover or a settings menu.
+ */
+.restoration-verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.restoration-verdict__corroborating {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.restoration-verdict__corroborating-label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.restoration-verdict__disclosure summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.restoration-verdict__disclosure p {
+  margin: 0.5rem 0 0;
+  font-size: 0.86rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+html,
+body {
+  max-width: 100%;
 }
