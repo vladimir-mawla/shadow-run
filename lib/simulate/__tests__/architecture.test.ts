@@ -1,7 +1,21 @@
-import { describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import {
+  isCallExpression,
+  isExportDeclaration,
+  isExternalModuleReference,
+  isIdentifier,
+  isImportDeclaration,
+  isImportEqualsDeclaration,
+  isImportExpression,
+  isStringLiteralLikeNode,
+  type Expression,
+  type Node,
+  type SourceFile,
+} from "typescript/unstable/ast";
+import { API, type Project } from "typescript/unstable/sync";
 
 /**
  * INVARIANT: `lib/simulate/**` NEVER reaches an LLM, the network, or a
@@ -11,7 +25,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
  * so 'you're just asking a model to guess' is falsifiable and false by
  * construction, not by assertion." The build brief additionally asks for
  * this to survive ordinary reformatting, citing two precedents from this
- * account's own history — read both before trusting any regex here:
+ * account's own history — read both before trusting any check here:
  *
  *   - decision-engine's `lib/__tests__/framework-free.test.ts`: its FIRST
  *     guard matched import/export keywords anchored to the START of a
@@ -23,160 +37,246 @@ import { dirname, join, relative, resolve, sep } from "node:path";
  *         } from "react";
  *     — defeated it outright: the line that actually carries `from
  *     "react"` is `} from "react";`, which does not start with `import`,
- *     so the line-anchored regex never even looked at it. Two further
- *     evasions (a template-literal dynamic import, a bare `require()`)
- *     were found in the same review. The fix there was to stop matching
- *     STATEMENTS (line position) and instead find SPECIFIERS wherever a
- *     `from`/`import(`/`require(` context precedes them, via a real
- *     character-by-character tokenizer that treats strings and comments
- *     as opaque spans. This file reuses that exact tokenizer shape.
+ *     so the line-anchored regex never even looked at it.
  *   - THIS repo's own `app/milestones.test.ts` drift guard (the DONE.html
  *     vs. PLAN.md consistency check) was bypassed FIVE separate times in
- *     this project's own commit history (`git log`: "Fix drift guard
- *     round 4", "round 5 removed nested-element support entirely", etc.)
- *     — every round was the same shape: the guard tried to cleverly parse
- *     an open-ended, flexible surface (an HTML table's cell contents,
- *     tolerating nested elements, whitespace variations...) and something
- *     legitimate kept almost-matching the pattern closely enough to slip
- *     past a slightly-too-permissive regex. The lesson taken here,
- *     directly: **prefer checking a canonical, unambiguous form over
- *     cleverly parsing a flexible one.**
+ *     this project's own commit history — every round the same shape: the
+ *     guard tried to cleverly parse an open-ended, flexible surface and
+ *     something legitimate kept almost-matching the pattern closely
+ *     enough to slip past a slightly-too-permissive regex.
  *
- * THAT LESSON IS WHY THIS FILE IS AN ALLOWLIST, NOT A DENYLIST. A denylist
- * ("ban `openai`, `@anthropic-ai/sdk`, `node-fetch`, `axios`, every
- * `node:*` built-in, ...") is exactly the "flexible surface" shape that
- * kept losing above — it requires enumerating every bad package NAME
- * ahead of time, and a package this list's author didn't think to name
- * (a new SDK, an obscure network client, a differently-cased or scoped
- * variant) sails through untouched, forever, until someone notices. The
- * canonical, unambiguous form this file checks instead is: **every
- * non-test source file under `lib/simulate/**` may import ONLY via a
- * relative specifier** (starting with `./` or `../`) pointing somewhere
- * inside this repository. That single rule bans `node:fs`, `openai`,
- * `node-fetch`, a brand-new never-yet-invented LLM SDK, and everything
- * else bare/absolute, all in one unambiguous test with no enumeration to
- * keep current — it is checking WHAT SHAPE AN IMPORT IS ALLOWED TO HAVE,
- * not guessing at what shape a bad one might take.
+ * THAT LESSON IS WHY THIS FILE IS AN ALLOWLIST, NOT A DENYLIST — see
+ * `resolvesInsideAllowedRoots` below. That part of this file's design has
+ * never been reopened and is not touched by anything in this section.
  *
- * The one thing an import allowlist cannot reach: the global `fetch`
- * function needs no import at all (it is ambient in Node 18+ and every
- * browser). So this file ALSO bans a bare, standalone `fetch(` CALL
- * anywhere in non-test source under `lib/simulate/**` — checked the same
- * tokenizer-based way (never inside a string or comment, and not when it
- * is a property access like `obj.fetch(`, which is a different, unrelated
- * method this test has no basis to forbid).
+ * FIX HISTORY, PATH-CONTAINMENT SIDE (`resolvesInsideAllowedRoots`,
+ * unrelated to how specifiers/calls are FOUND — that history is below):
  *
- * FALSE-POSITIVE DISCIPLINE, MIRRORING `framework-free.test.ts`'S OWN: a
- * relative import of a LOCAL helper file that happens to be named
- * something like `./fetchable.js` must not be flagged (it isn't `fetch(`,
- * it's a specifier, checked by the allowlist rule, and it's relative, so
- * it passes that rule too) — and a comment or string that merely MENTIONS
- * `fetch`, `openai`, or `node:http` as prose must not be flagged either.
- * Both are proven in the "false-positive discipline" block below,
- * including this file's OWN sanity-test strings, the exact hazard
- * `framework-free.test.ts`'s header names by name.
+ *   - ROUND 1 (independent verification): the allowlist originally
+ *     checked specifier SYNTAX, not where it actually RESOLVES on disk —
+ *     `import openai from "../../node_modules/next/package.json"` passed
+ *     clean from `lib/simulate/adapter.ts`, because `../../node_modules/
+ *     next/package.json` starts with `./`/`../` even though it plainly
+ *     resolves into `node_modules/`. Fixed by resolving the specifier
+ *     against the importing file's real directory and checking the
+ *     result against a closed, explicit `ALLOWED_ROOTS` list (`lib/
+ *     simulate/`, `lib/contracts/`), with `root + sep` prefix comparison
+ *     so `lib/simulate-experimental` cannot pass by string-prefix
+ *     coincidence with `lib/simulate`.
+ *   - ROUND 2 (independent verification): the round-1 fix checked the
+ *     TEXTUAL resolved path, never dereferencing a symlink — a real
+ *     symlink placed inside `lib/simulate/`, pointing outside the
+ *     repository, passed the textual check while Node's real module
+ *     resolution would actually load the external target. Fixed by
+ *     `resolvesToRealAllowedPath` additionally `realpathSync`-ing the
+ *     resolved path (falling back to the enclosing directory when the
+ *     exact leaf does not exist, matching this repo's `.js`-specifier/
+ *     `.ts`-file convention, and failing closed if neither resolves) and
+ *     comparing against `realpathSync`'d roots, textual check kept
+ *     alongside rather than replaced.
  *
- * FIX (independent verification, first round): THE ALLOWLIST ORIGINALLY
- * CHECKED SYNTAX, NOT CONTAINMENT — a real, confirmed exploit, not a
- * theoretical one. `isAllowedSpecifier` (as first written) only tested
- * whether a specifier's TEXT started with `./` or `../`; it never asked
- * where that specifier actually RESOLVES to on disk. So this passed
- * clean, from a file located at `lib/simulate/adapter.ts`:
+ * See the "sanity: the containment rule itself" block below for the
+ * direct regression proof of both rounds; neither is reopened here.
  *
- *     import openai from "../../node_modules/next/package.json";
+ * FIX HISTORY, HOW SPECIFIERS/CALLS ARE FOUND AT ALL (the part THIS
+ * revision replaces outright):
  *
- * `../../node_modules/next/package.json`, resolved against
- * `lib/simulate/`'s real location, lands squarely inside this repo's
- * real `node_modules/` — confirmed with `existsSync` in this file's own
- * regression test below, not assumed. A relative specifier can walk
- * arbitrarily far up the tree via repeated `../` and land ANYWHERE,
- * including inside `node_modules` (any LLM SDK a future milestone
- * installs), a sibling milestone's own frozen directory, or outside the
- * repository entirely. Checking specifier TEXT was exactly the kind of
- * approximation this file's own header already warns against — the same
- * "cleverly parse a flexible surface" failure mode as `app/
- * milestones.test.ts`'s five-times-bypassed drift guard, one property
- * over: syntax was flexible, containment is the actual, unambiguous
- * property that matters.
+ *   - ROUNDS 1–3 (a hand-rolled, character-by-character tokenizer):
+ *     treated `"`/`'`/`` ` `` as opaque string spans (so a specifier
+ *     context was matched by inspecting the CODE immediately preceding a
+ *     literal, never a literal's own contents) and separately watched
+ *     for a bare `fetch(` call in the non-string code stream. ROUND 3
+ *     made template-literal `${...}` interpolations re-enter "code mode"
+ *     recursively, closing a bypass where `` `${await
+ *     fetch("https://example.com")}` `` hid a live `fetch(` call inside
+ *     what the tokenizer had been treating as one opaque backtick span.
+ *   - ROUND 4 (independent verification — THE ONE THAT ENDED THE
+ *     TOKENIZER, NOT JUST PATCHED IT): a regex literal containing a
+ *     backtick defeats ROUND 3's fix completely, for the REST OF THE
+ *     FILE, because the tokenizer has no concept of a regex literal at
+ *     all:
  *
- * THE FIX: `resolvesInsideAllowedRoots(fromFile, specifier)` replaces
- * `isAllowedSpecifier(specifier)`. It resolves the specifier against the
- * IMPORTING FILE's real directory (`node:path`'s `resolve`, which fully
- * normalizes `..` segments — never a string-counting depth heuristic,
- * which this repo's own drift-guard history already shows is not robust)
- * and checks the resulting absolute path against an explicit, closed list
- * of allowed roots: `lib/simulate/` itself, and `lib/contracts/` (the one
- * frozen, already-audited dependency this milestone is allowed to use —
- * every real import in this codebase's own source targets one of these
- * two). Anything resolving outside both — `node_modules`, a sibling
- * milestone's `lib/reconcile`/`lib/rollback`, the repository root, outside
- * the repository — is rejected, regardless of how many `../` segments the
- * specifier's TEXT contains or how it's formatted. Prefix comparison uses
- * `root + sep` (never a bare `startsWith(root)`), so a sibling directory
- * that merely starts with the same characters — `lib/simulate-experimental`
- * against `lib/simulate` — cannot pass by string-prefix coincidence.
+ *         const re = /`/;
+ *         fetch("https://evil.example");
  *
- * FIX (independent verification, SECOND round): THE FIRST FIX CHECKED THE
- * TEXTUAL PATH, NOT THE REAL ONE — the same class of gap, one layer
- * deeper. `resolve()` is pure string arithmetic; it never dereferences a
- * symlink. So a REAL symlink placed inside `lib/simulate/` — e.g.
- * `lib/simulate/zz-attack-symlink` pointing at an arbitrary directory
- * outside the repository — made `resolvesInsideAllowedRoots(fromFile,
- * "./zz-attack-symlink/evil.js")` return `true`: the computed path's TEXT
- * starts with `SIMULATE_ROOT + sep`, so the textual check (correctly)
- * passed it, but Node's real module resolution DOES follow symlinks, so
- * this would actually load external code at runtime. Confirmed with a
- * real symlink (`ln -s`, not a synthetic string), not assumed. Git tracks
- * symlinks as ordinary repository objects, so one can land in a future
- * commit exactly like any other file.
+ *     A `` ` `` inside the regex is indistinguishable, to a tokenizer
+ *     with no regex-literal handling, from the START of a template
+ *     literal — so `scanTemplateBody` began scanning forward for a
+ *     matching close backtick that never comes, and silently swallowed
+ *     every line after it, INCLUDING the perfectly plain, unobfuscated
+ *     `fetch(...)` call, as inert string content. Confirmed directly:
+ *     `bareFetchCalls: []` for the snippet above, versus `[{"line":2}]`
+ *     for the same snippet with `const re = 1;` in place of the regex.
+ *     Unlike every gap ROUND 3 already disclosed (which all require the
+ *     forbidden call to avoid being spelled plainly — `globalThis
+ *     ["fetch"]`, an alias, a computed specifier), THIS one hides a
+ *     completely plain `fetch(...)` behind ordinary regex syntax earlier
+ *     in the file — outside every boundary this file's own gap list had
+ *     named, not a new instance of an already-disclosed one.
  *
- * THE FIX: `resolvesToRealAllowedPath` (below) additionally
- * `realpathSync`s the resolved path and checks THAT against
- * `realpathSync`'d allowed roots — layered ON TOP OF the textual check,
- * never instead of it (see the three points below; the third is why both
- * checks stay). Three things had to be gotten right, each because a
- * naive `realpathSync` fix commonly gets it wrong:
+ *     Regex-vs-division is a genuinely CONTEXT-SENSITIVE lexical
+ *     ambiguity in JavaScript/TypeScript — whether a `/` starts a regex
+ *     or is a division operator depends on grammar position (does the
+ *     parser expect an expression or an operand here), which a character
+ *     tokenizer with no parser behind it cannot resolve correctly in
+ *     general. Patching this specific case (add a heuristic for "does
+ *     `/` start a regex here") would be the FOURTH round of hand-rolled
+ *     lexing fixes on this exact function, echoing this account's own
+ *     precedent named in the original header: `decision-engine`'s
+ *     `framework-free.test.ts` needed real character-by-character
+ *     tokenizing after regex anchoring failed once; separately, one
+ *     function in this repo's own M2 needed six rounds and five bypasses
+ *     before the actual fix turned out to be DELETING the guessed
+ *     capability rather than parsing it more cleverly. Both are the same
+ *     lesson: a hand-rolled scanner's gaps are open-ended, and finding
+ *     one more of them is not evidence the scanner is now complete.
  *
- *   1. `realpathSync` THROWS on a path that does not exist — and every
- *      real, legitimate specifier in this codebase's own source ends in
- *      `.js` while pointing at a same-named `.ts` file on disk (this
- *      repo's NodeNext convention; `next.config.ts`'s own
- *      `extensionAlias` comment documents the same mapping), so the
- *      literal resolved path routinely does not exist under that exact
- *      name. FAIL CLOSED, deliberately, in the genuinely-unresolvable
- *      case: if the exact leaf does not exist, this falls back to
- *      realpath-ing its ENCLOSING DIRECTORY instead (safe, because a
- *      name that doesn't exist at all cannot itself be a symlink escaping
- *      anywhere — the only thing left to distrust is the directory it
- *      would live in, which a genuine import needs to actually exist
- *      regardless of the leaf's exact extension). If NEITHER the leaf nor
- *      its directory resolves to anything real, the specifier is
- *      REJECTED — never waved through just because this check couldn't
- *      pin down where it actually goes.
- *   2. THE ROOTS ARE REALPATH'D TOO, once, at module load
- *      (`REAL_ALLOWED_ROOTS` below) — comparing a realpath'd candidate
- *      against un-realpath'd roots would misfire the moment the
- *      repository itself sits under a symlink (common on macOS, where
- *      `/tmp` is itself a symlink to `/private/tmp`), producing a false
- *      rejection of a perfectly legitimate, correctly-contained file —
- *      a failure mode that LOOKS like a working guard while actually
- *      being simply wrong. Both sides of the comparison are normalized
- *      the same way, or the comparison means nothing.
- *   3. THE TEXTUAL CHECK STAYS — `resolvesInsideAllowedRoots` runs it
- *      FIRST and only proceeds to the realpath check if it passes. Two
- *      independent checks that can each fail on their own terms (one
- *      catching a `../` escape with no symlink involved at all, the
- *      other catching a symlink that textually looks contained) beat one
- *      clever combined one — this repo's own drift-guard history is the
- *      standing argument for why, paid for five times over already.
+ * THE FIX (ROUND 4): DELETE THE TOKENIZER. `tokenize`/`scanCode`/
+ * `scanTemplateBody` are gone. This file parses every file/snippet it
+ * inspects with the REAL TypeScript compiler — `typescript` is already
+ * this repo's own devDependency, used for `npm run typecheck` — via
+ * `typescript/unstable/sync`'s `API`/`Project`/`Program`, and walks the
+ * resulting AST with `Node#forEachChild` (a real method on every node
+ * this API returns, not a hand-rolled traversal). `analyzeFile`/
+ * `analyzeSource` (below) replace `tokenize`.
+ *
+ * ROUND 4's OWN HEADER, AT THE TIME, CLAIMED THIS CLOSED THE BUG CLASS
+ * ("a real parser has no lexical/syntactic blind spots left for this
+ * file's scope"). INDEPENDENT VERIFICATION FOUND THAT CLAIM FALSE, NOT
+ * MERELY INCOMPLETE — the class had MOVED, not closed:
+ *
+ *     const x = `unterminated
+ *     fetch("https://evil.example");        →  bareFetchCalls: []
+ *
+ *     function broken( {
+ *     fetch("https://evil.example");        →  bareFetchCalls: []
+ *
+ * Both are SYNTAX ERRORS. The real compiler's PARSER does not throw on
+ * them — it does error RECOVERY, the same thing every production parser
+ * does for a broken file (so one typo doesn't blank out an entire
+ * editor's syntax highlighting) — and recovery can absorb the following,
+ * PERFECTLY VALID `fetch(...)` call into the wrong node, or drop it from
+ * the tree the walk actually sees. Zero findings, no exception thrown,
+ * the test suite green. This is the EXACT SAME "a broken file looks
+ * identical to a clean one" failure the hand-rolled tokenizer had
+ * (rounds 1–4, in various shapes) — it did not go away when the
+ * tokenizer was deleted, it moved from the LEXER to the COMPILER'S ERROR
+ * RECOVERY, one layer down. Deleting a scanner does not delete the
+ * PROPERTY "this tool can be fed input it silently mishandles" — it only
+ * moves where that property's remaining instances live.
+ *
+ * THE FIX (ROUND 5): FAIL CLOSED ON DIAGNOSTICS.
+ * `project.program.getSyntacticDiagnostics(file)` returns nonzero for
+ * BOTH reproductions above and `0` for equivalent clean input — checked
+ * directly, not assumed. `analyzeFile` (below) now calls this BEFORE
+ * walking the AST at all: if a file has ANY syntactic diagnostic, this
+ * throws `UnparseableFileError` naming the file and the diagnostic
+ * text(s), and the analysis never runs. A file this guard cannot parse
+ * as valid TypeScript is now an automatic offender — never silently
+ * treated as clean — for `analyzeSource`'s synthetic callers (the throw
+ * propagates directly) and for `scan()`'s real-file walk (caught per
+ * file and reported as a `parseOffender`, checked by its own dedicated
+ * test below, distinct from the specifier/fetch offender lists).
+ *
+ * THE HONEST SCOPE OF THIS FIX, STATED AT EXACTLY ITS TRUE STRENGTH —
+ * NOT "the bug class is closed," WHICH WOULD BE THE SAME OVERCLAIM ROUND
+ * 4 MADE, ONE LEVEL UP: this closes the CLASS "a syntactically INVALID
+ * file is silently treated as if it had nothing to report," for any
+ * syntax error the compiler's own parser detects — not just the two
+ * reported shapes. It does NOT, and cannot, close "code that is
+ * syntactically VALID but never spells the forbidden operation as code
+ * at all" — see "WHAT IS AND ISN'T CAUGHT NOW" below, which now
+ * distinguishes VALID input's guarantee from INVALID input's fail-closed
+ * behavior explicitly, rather than collapsing both into one "no blind
+ * spots" sentence the way round 4's header did.
+ *
+ * WHAT COUNTS AS "A SPECIFIER" NOW, PRECISELY (the AST-native replacement
+ * for the old text-based `SPECIFIER_CONTEXT_PATTERNS`): the module
+ * specifier of an `ImportDeclaration` (`import ... from "x"` or the
+ * side-effect-only `import "x"`), the moduleSpecifier of an
+ * `ExportDeclaration` (`export { x } from "y"` AND `export * from "y"` —
+ * ADDED IN ROUND 5, see below), the expression of an
+ * `ExternalModuleReference` (`import x = require("x")`), and the first
+ * argument of a `require(...)` call or a dynamic `import(...)` call
+ * (detected via `isImportExpression`, the real AST predicate for the
+ * `import` keyword used as a call target — not a textual `import\s*\(`
+ * match). When that argument is a string literal or a no-substitution
+ * template literal, its literal text is recorded, exactly as the old
+ * tokenizer did. When it is ANYTHING ELSE — a variable, a computed
+ * expression, a template literal WITH interpolation — its raw source
+ * text is recorded instead, and `resolvesInsideAllowedRoots` rejects it
+ * for not looking like a relative specifier, same as any other offender.
+ * This is a real improvement over the old tokenizer, not a side effect:
+ * a dynamically-computed specifier (`import(someVariable)`) was
+ * PREVIOUSLY, EXPLICITLY DISCLOSED as unreachable ("nothing resolvable is
+ * ever a string literal in scan reach") — the AST sees the CALL is an
+ * import regardless of what its argument looks like, so it can flag a
+ * non-literal argument outright instead of silently having nothing to
+ * look at.
+ *
+ * FIX (ROUND 5, SECOND FINDING): `export ... from "x"` AND `export *
+ * from "x"` produced ZERO specifier offenders under rounds 1–4 — `visit`
+ * never checked `ExportDeclaration.moduleSpecifier` at all, even though
+ * it is structurally identical to `ImportDeclaration.moduleSpecifier`
+ * and the existing `recordSpecifier` helper needed no changes to accept
+ * it. Every header through round 4 claimed completeness for "every
+ * import/require specifier" while this re-export path sat uncovered —
+ * an overclaim as well as a gap, both closed by this one added branch.
+ *
+ * WHAT COUNTS AS "A BARE `fetch(` CALL" NOW: a `CallExpression` whose
+ * `expression` is an `Identifier` with text `"fetch"` — the AST-native
+ * replacement for the old `BARE_FETCH_TAIL` regex, with the identical
+ * scope: `obj.fetch(...)` (a `PropertyAccessExpression`, not an
+ * `Identifier`) and `refetchAll()`/`myFetcher()` (different `Identifier`
+ * text) are excluded exactly as before, but now because the AST says so
+ * structurally, not because a regex's negative lookbehind/lookahead
+ * happened to get the edge cases right.
+ *
+ * WHAT IS AND ISN'T CAUGHT NOW, STATED PLAINLY, VALID AND INVALID INPUT
+ * KEPT DELIBERATELY SEPARATE (see the "teeth"/"false-positive
+ * discipline"/"fails closed" blocks below for the direct proof of each
+ * claim, not just this paragraph's word):
+ *   - FOR SYNTACTICALLY VALID INPUT: every case the old tokenizer's
+ *     rounds 1–3 caught (a Prettier-wrapped multi-line import, a
+ *     template-literal dynamic import, a bare `require()`, a
+ *     side-effect-only import, `fetch(` hidden inside a `${...}`
+ *     interpolation at any nesting depth), PLUS the round-4 regex-
+ *     literal bypass (a real parser never confuses a regex literal for
+ *     a template literal — that is not a special case, it is just
+ *     correct parsing), PLUS a dynamically-computed import specifier and
+ *     a re-export's specifier (both previously undetectable, both now
+ *     flagged) are ALL caught, and a valid file has NO remaining
+ *     lexical/syntactic blind spot in this file's scope — that claim is
+ *     now scoped correctly to where it is actually true.
+ *   - FOR SYNTACTICALLY INVALID INPUT: rejected OUTRIGHT as an automatic
+ *     offender (round 5) — never scanned as if it were clean, regardless
+ *     of what error recovery would have done with it. This is a
+ *     DIFFERENT guarantee from the one above, not a stronger version of
+ *     it: it does not claim to know what a broken file "really" contains,
+ *     only that this guard refuses to certify one as clean.
+ *   - STILL NOT CAUGHT, ON VALID INPUT, BY DESIGN, NOT OVERSIGHT:
+ *     anything that never spells `fetch(` or an import/require/export
+ *     CALL as CODE at all — `globalThis["fetch"]`, a destructured/
+ *     aliased reference (`const f = fetch; f(url)`), or a keyword/URL
+ *     typed out only inside an ORDINARY string/comment meant for
+ *     `eval`/`Function(...)` later. Strings and comments stay
+ *     deliberately opaque as DATA — the real parser does not execute or
+ *     re-interpret their contents any more than the old tokenizer did,
+ *     and re-scanning literal text for keywords would reintroduce
+ *     exactly the false-positive-prone "cleverly parse a flexible
+ *     surface" failure this file's own header already argues against.
+ *     These are SEMANTIC gaps (the code never names the forbidden
+ *     operation at all, even once correctly parsed) — a genuinely
+ *     different category from the LEXICAL/SYNTACTIC ones rounds 1–5 were
+ *     about, and this file does not claim to have closed them.
  */
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
 const SIMULATE_ROOT = join(REPO_ROOT, "lib", "simulate");
 const CONTRACTS_ROOT = join(REPO_ROOT, "lib", "contracts");
-/** The closed list of directories a `lib/simulate/**` source file may resolve an import into — itself, and the one frozen dependency it is allowed to use. See the file header's "FIX" paragraph for why containment against THIS list, not specifier syntax, is the actual property being checked. */
+/** The closed list of directories a `lib/simulate/**` source file may resolve an import into — itself, and the one frozen dependency it is allowed to use. See the file header's "FIX HISTORY, PATH-CONTAINMENT SIDE" for why containment against THIS list, not specifier syntax, is the actual property being checked. */
 const ALLOWED_ROOTS: readonly string[] = [SIMULATE_ROOT, CONTRACTS_ROOT];
-/** The SAME roots, realpath'd once at module load — see the file header's "FIX (SECOND round)" point 2 for why comparing a realpath'd candidate against these un-normalized `ALLOWED_ROOTS` would be wrong: both sides of every real-path comparison must go through the identical normalization, or the comparison proves nothing. Computed eagerly, not defensively wrapped in try/catch: `lib/simulate/` and `lib/contracts/` not existing at all would mean this very test file couldn't have been found to run in the first place — a hard failure worth surfacing immediately, not a case to "fail closed" gracefully around. */
+/** The SAME roots, realpath'd once at module load — comparing a realpath'd candidate against un-normalized `ALLOWED_ROOTS` would misfire the moment the repository itself sits under a symlink (common on macOS, where `/tmp` is itself a symlink to `/private/tmp`). Computed eagerly, not defensively wrapped in try/catch: `lib/simulate/` and `lib/contracts/` not existing at all would mean this very test file couldn't have been found to run in the first place. */
 const REAL_ALLOWED_ROOTS: readonly string[] = ALLOWED_ROOTS.map((root) => realpathSync(root));
 /** A representative real file location, used throughout this file's synthetic (no-real-file-needed) specifier checks below — `resolve()` is pure path arithmetic and does not require `adapter.ts` to be the file actually being checked. */
 const FROM_ADAPTER = join(SIMULATE_ROOT, "adapter.ts");
@@ -206,104 +306,135 @@ interface FoundBareFetchCall {
 }
 
 /**
- * The four contexts (checked against the CODE immediately preceding a
- * string/template literal, never its contents) that make that literal a
- * module specifier rather than an ordinary string value — identical set
- * to `framework-free.test.ts`'s own, for the same reasons stated there.
+ * Thrown by `analyzeFile` the moment the real compiler reports ANY
+ * syntactic diagnostic for a file — see the file header's "THE FIX
+ * (ROUND 5)" paragraph for why this exists: error RECOVERY (not a
+ * thrown exception) is how a real parser normally handles broken input,
+ * and recovery can absorb a perfectly plain, valid statement following a
+ * syntax error into the wrong place in the tree, or drop it entirely, so
+ * a broken file can walk clean with zero findings. This class exists so
+ * a caller can distinguish "this file could not be trusted to scan at
+ * all" from any other exception without string-matching a message, the
+ * same discipline this codebase's own `PathResolutionError`/
+ * `RollbackStepFailedError` already established elsewhere.
  */
-const SPECIFIER_CONTEXT_PATTERNS: readonly RegExp[] = [
-  /\bfrom\s*$/,
-  /\bimport\s*$/,
-  /\bimport\s*\(\s*$/,
-  /\brequire\s*\(\s*$/,
-];
-
-function isSpecifierContext(codeTail: string): boolean {
-  return SPECIFIER_CONTEXT_PATTERNS.some((pattern) => pattern.test(codeTail));
-}
-
-/** True if a `fetch` identifier ending at the tail's end is a real, standalone call target — not `obj.fetch` (preceded by `.`) and not part of a longer identifier like `myFetch`/`_fetch`/`fetch2` (preceded/followed by an identifier character). The caller has already confirmed the character immediately after this tail is `(` before calling this. */
-const BARE_FETCH_TAIL = /(?<![.\w$])fetch\s*$/;
-
-function isBareFetchIdentifier(codeTail: string): boolean {
-  return BARE_FETCH_TAIL.test(codeTail);
+class UnparseableFileError extends Error {
+  constructor(file: string, diagnosticMessages: readonly string[]) {
+    super(
+      `could not parse ${file} as valid TypeScript — refusing to scan it as if it were clean ` +
+        `(${diagnosticMessages.length} syntax diagnostic(s)): ${diagnosticMessages.join("; ")}`,
+    );
+    this.name = "UnparseableFileError";
+  }
 }
 
 /**
- * Tokenizes `source` exactly the way `framework-free.test.ts` does (block/
- * line comments and string/template-literal CONTENTS are opaque spans,
- * never re-scanned, never allowed to feed a context check on either
- * side), extended to ALSO watch for a bare `fetch(` call in the non-
- * string, non-comment code stream. One pass, two things collected, so
- * both checks see the exact same "what is really code" view of the file.
+ * ONE `API` instance for this whole file, spun up once and reused across
+ * every test — spawning the real compiler's backing process costs real
+ * (if small) time (tens of milliseconds), so paying it once in
+ * `beforeAll` rather than per assertion keeps this file fast. Every
+ * `analyzeSource`/`analyzeFile` call below goes through this instance.
  */
-function tokenize(source: string): { specifiers: readonly FoundSpecifier[]; bareFetchCalls: readonly FoundBareFetchCall[] } {
-  const specifiers: FoundSpecifier[] = [];
-  const bareFetchCalls: FoundBareFetchCall[] = [];
-  const n = source.length;
-  let i = 0;
-  let line = 1;
-  let codeTail = "";
+let api: API;
+beforeAll(() => {
+  api = new API();
+});
+afterAll(() => {
+  api.close();
+});
 
-  while (i < n) {
-    const c = source[i];
-    const next = source[i + 1];
-
-    if (c === "/" && next === "/") {
-      while (i < n && source[i] !== "\n") i++;
-      codeTail = "";
-      continue;
-    }
-
-    if (c === "/" && next === "*") {
-      i += 2;
-      while (i < n && !(source[i] === "*" && source[i + 1] === "/")) {
-        if (source[i] === "\n") line++;
-        i++;
-      }
-      i += 2;
-      codeTail = "";
-      continue;
-    }
-
-    if (c === '"' || c === "'" || c === "`") {
-      const quote = c;
-      const startLine = line;
-      const specifierPosition = isSpecifierContext(codeTail);
-
-      let content = "";
-      i++; // step past opening quote
-      while (i < n && source[i] !== quote) {
-        if (source[i] === "\\") {
-          content += source[i] + (source[i + 1] ?? "");
-          if (source[i + 1] === "\n") line++;
-          i += 2;
-          continue;
-        }
-        if (source[i] === "\n") line++;
-        content += source[i];
-        i++;
-      }
-      i++; // step past closing quote (or EOF, harmlessly)
-
-      if (specifierPosition && !content.includes("${")) {
-        specifiers.push({ specifier: content, line: startLine });
-      }
-
-      codeTail = ""; // the string is consumed; nothing on its far side may combine with code from before it.
-      continue;
-    }
-
-    if (c === "(" && isBareFetchIdentifier(codeTail)) {
-      bareFetchCalls.push({ line });
-    }
-
-    if (c === "\n") line++;
-    codeTail = (codeTail + c).slice(-60);
-    i++;
+/**
+ * Parses `file` with the real compiler and extracts exactly the two
+ * things this file cares about — see the file header's "WHAT COUNTS AS"
+ * paragraphs for the precise rules. `file` must already exist on disk;
+ * callers that only have source TEXT use `analyzeSource` below, which
+ * materializes a scratch file first.
+ *
+ * FAILS CLOSED ON SYNTAX ERRORS (round 5, see file header): the very
+ * first thing this does, before any AST walk, is check
+ * `getSyntacticDiagnostics` — throwing `UnparseableFileError` rather
+ * than walking a tree error recovery may have silently reshaped.
+ */
+function analyzeFile(file: string): { specifiers: readonly FoundSpecifier[]; bareFetchCalls: readonly FoundBareFetchCall[] } {
+  const snapshot = api.updateSnapshot({ openFiles: [file] });
+  const project: Project | undefined = snapshot.getDefaultProjectForFile(file);
+  const sf: SourceFile | undefined = project?.program.getSourceFile(file);
+  if (!project || !sf) {
+    throw new Error(`analyzeFile: the real compiler could not load/parse ${file}`);
   }
 
+  const diagnostics = project.program.getSyntacticDiagnostics(file);
+  if (diagnostics.length > 0) {
+    api.updateSnapshot({ closeFiles: [file] });
+    throw new UnparseableFileError(file, diagnostics.map((d) => d.text));
+  }
+
+  const specifiers: FoundSpecifier[] = [];
+  const bareFetchCalls: FoundBareFetchCall[] = [];
+  const lineOf = (node: Node): number => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
+
+  function recordSpecifier(expr: Expression | undefined): void {
+    if (!expr) return;
+    if (isStringLiteralLikeNode(expr)) {
+      specifiers.push({ specifier: expr.text, line: lineOf(expr) });
+    } else {
+      // A non-literal (dynamically computed) specifier — see file
+      // header's "WHAT COUNTS AS 'A SPECIFIER'" paragraph: recorded
+      // under its own raw source text so `resolvesInsideAllowedRoots`
+      // rejects it for not looking like a relative specifier, rather
+      // than silently having nothing to check (the old tokenizer's
+      // disclosed, now-closed gap).
+      specifiers.push({ specifier: expr.getText(sf), line: lineOf(expr) });
+    }
+  }
+
+  function visit(node: Node): void {
+    if (isImportDeclaration(node)) {
+      recordSpecifier(node.moduleSpecifier);
+    } else if (isExportDeclaration(node)) {
+      // `export { x } from "y"` and `export * from "y"` — see file
+      // header's "FIX (ROUND 5, SECOND FINDING)": structurally identical
+      // to `ImportDeclaration.moduleSpecifier`, previously never
+      // checked. `moduleSpecifier` is `undefined` for a plain
+      // `export { x }` with no `from` clause — `recordSpecifier` already
+      // no-ops on `undefined`.
+      recordSpecifier(node.moduleSpecifier);
+    } else if (isImportEqualsDeclaration(node) && isExternalModuleReference(node.moduleReference)) {
+      recordSpecifier(node.moduleReference.expression);
+    } else if (isCallExpression(node)) {
+      if (isImportExpression(node.expression)) {
+        recordSpecifier(node.arguments[0]);
+      } else if (isIdentifier(node.expression) && node.expression.text === "require") {
+        recordSpecifier(node.arguments[0]);
+      } else if (isIdentifier(node.expression) && node.expression.text === "fetch") {
+        bareFetchCalls.push({ line: lineOf(node) });
+      }
+    }
+    node.forEachChild(visit);
+  }
+
+  visit(sf);
+  api.updateSnapshot({ closeFiles: [file] });
   return { specifiers, bareFetchCalls };
+}
+
+/**
+ * Analyzes a source SNIPPET rather than a real file on disk — every
+ * synthetic test below (`analyzeSource("...")`) uses this. Materializes
+ * `source` into a throwaway `.ts` file under a fresh temp directory (the
+ * real compiler needs a real file — see `typescript/unstable/sync`'s own
+ * design, LSP-shaped rather than string-in/AST-out), analyzes it via
+ * `analyzeFile`, then removes the scratch directory unconditionally.
+ */
+function analyzeSource(source: string): { specifiers: readonly FoundSpecifier[]; bareFetchCalls: readonly FoundBareFetchCall[] } {
+  const dir = mkdtempSync(join(tmpdir(), "shadow-run-arch-scan-"));
+  const file = join(dir, "snippet.ts");
+  writeFileSync(file, source);
+  try {
+    return analyzeFile(file);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -319,22 +450,21 @@ function isRealPathContained(candidate: string): boolean {
 
 /**
  * The SECOND check `resolvesInsideAllowedRoots` runs, ONLY on a path that
- * already passed the textual one — see the file header's "FIX (SECOND
- * round)" paragraph for the full argument on why this exists and the
- * three things it had to get right. Tries the exact resolved leaf first
- * (catches a symlink placed AT that exact name, whether a file or a
- * directory); if that name does not exist at all, falls back to the
- * enclosing directory (safe — a nonexistent name cannot itself be a
- * symlink, and the directory it would live in is what a genuine import
- * actually depends on existing); if NEITHER resolves to anything real,
- * fails closed.
+ * already passed the textual one — see the file header's "FIX HISTORY,
+ * PATH-CONTAINMENT SIDE" (round 2) for the full argument. Tries the exact
+ * resolved leaf first (catches a symlink placed AT that exact name,
+ * whether a file or a directory); if that name does not exist at all,
+ * falls back to the enclosing directory (safe — a nonexistent name
+ * cannot itself be a symlink, and the directory it would live in is what
+ * a genuine import actually depends on existing); if NEITHER resolves to
+ * anything real, fails closed.
  */
 function resolvesToRealAllowedPath(resolved: string): boolean {
   try {
     return isRealPathContained(realpathSync(resolved));
   } catch {
     // Falls through to the directory-level attempt below — see this
-    // function's own doc comment and the file header's point 1.
+    // function's own doc comment.
   }
   try {
     return isRealPathContained(realpathSync(dirname(resolved)));
@@ -345,19 +475,14 @@ function resolvesToRealAllowedPath(resolved: string): boolean {
 
 /**
  * A specifier is allowed if and only if (1) it is syntactically relative
- * (`./...` or `../...` — a bare specifier like `"openai"` or `"node:fs"`
- * is rejected outright here, BEFORE any path resolution: `resolve()`
- * would otherwise happily treat a bare string as relative-to-`fromFile`
- * too, which is not how Node's real module resolution treats a bare
- * specifier, and would be the wrong question to ask of one anyway),
- * (2) resolving it against `fromFile`'s real directory lands TEXTUALLY
- * inside one of `ALLOWED_ROOTS` — see the file header's "FIX" paragraph
- * for the exact exploit this containment check exists to close, which a
- * syntax-only check (`specifier.startsWith("./")`) already missed once —
- * AND (3) that same resolved path ALSO lands inside the allowed roots
- * once symlinks are followed (`resolvesToRealAllowedPath`) — see the
- * file header's "FIX (SECOND round)" paragraph for the exploit THIS half
- * exists to close, which the textual check alone could not.
+ * (`./...` or `../...` — a bare specifier like `"openai"` or `"node:fs"`,
+ * or the raw source text of a non-literal specifier, is rejected outright
+ * here, BEFORE any path resolution), (2) resolving it against `fromFile`'s
+ * real directory lands TEXTUALLY inside one of `ALLOWED_ROOTS`, AND (3)
+ * that same resolved path ALSO lands inside the allowed roots once
+ * symlinks are followed (`resolvesToRealAllowedPath`). See the file
+ * header's "FIX HISTORY, PATH-CONTAINMENT SIDE" for the exploits rounds 1
+ * and 2 each close.
  */
 function resolvesInsideAllowedRoots(fromFile: string, specifier: string): boolean {
   if (!specifier.startsWith("./") && !specifier.startsWith("../")) return false;
@@ -378,22 +503,37 @@ interface FetchOffender {
   readonly line: number;
 }
 
-function scan(): { specifierOffenders: SpecifierOffender[]; fetchOffenders: FetchOffender[] } {
+/** A real, on-disk file this guard refused to scan because the compiler could not parse it as valid TypeScript — see `UnparseableFileError` and the file header's "THE FIX (ROUND 5)" paragraph. Kept as its own list, never folded into `specifierOffenders`/`fetchOffenders`: "this file could not be checked" and "this file was checked and failed" are different findings and should not be reported as if they were the same one. */
+interface ParseOffender {
+  readonly file: string;
+  readonly message: string;
+}
+
+function scan(): { specifierOffenders: SpecifierOffender[]; fetchOffenders: FetchOffender[]; parseOffenders: ParseOffender[] } {
   const specifierOffenders: SpecifierOffender[] = [];
   const fetchOffenders: FetchOffender[] = [];
+  const parseOffenders: ParseOffender[] = [];
   for (const file of listNonTestSourceFiles(SIMULATE_ROOT)) {
-    const source = readFileSync(file, "utf8");
-    const { specifiers, bareFetchCalls } = tokenize(source);
-    for (const { specifier, line } of specifiers) {
+    let result: { specifiers: readonly FoundSpecifier[]; bareFetchCalls: readonly FoundBareFetchCall[] };
+    try {
+      result = analyzeFile(file);
+    } catch (error) {
+      if (error instanceof UnparseableFileError) {
+        parseOffenders.push({ file: relative(REPO_ROOT, file), message: error.message });
+        continue;
+      }
+      throw error;
+    }
+    for (const { specifier, line } of result.specifiers) {
       if (!resolvesInsideAllowedRoots(file, specifier)) {
         specifierOffenders.push({ file: relative(REPO_ROOT, file), line, specifier });
       }
     }
-    for (const { line } of bareFetchCalls) {
+    for (const { line } of result.bareFetchCalls) {
       fetchOffenders.push({ file: relative(REPO_ROOT, file), line });
     }
   }
-  return { specifierOffenders, fetchOffenders };
+  return { specifierOffenders, fetchOffenders, parseOffenders };
 }
 
 describe("lib/simulate/** never reaches an LLM, the network, or a Node built-in", () => {
@@ -419,6 +559,18 @@ describe("lib/simulate/** never reaches an LLM, the network, or a Node built-in"
       throw new Error(`lib/simulate/** may never call the global fetch() — found ${fetchOffenders.length} call(s):\n${report}`);
     }
     expect(fetchOffenders).toEqual([]);
+  });
+
+  it("every non-test source file under lib/simulate/** parses as valid TypeScript — a file this guard cannot parse is an automatic offender, never silently treated as clean (round 5)", () => {
+    const { parseOffenders } = scan();
+    if (parseOffenders.length > 0) {
+      const report = parseOffenders.map((o) => `${o.file}: ${o.message}`).join("\n");
+      throw new Error(
+        `lib/simulate/** contains ${parseOffenders.length} file(s) this guard could not parse as valid TypeScript ` +
+          `— refusing to treat unparseable source as clean:\n${report}`,
+      );
+    }
+    expect(parseOffenders).toEqual([]);
   });
 
   describe("sanity: the containment rule itself", () => {
@@ -549,80 +701,157 @@ describe("lib/simulate/** never reaches an LLM, the network, or a Node built-in"
     });
   });
 
-  describe("teeth: the same evasions that defeated the sibling's line-anchored guard, confirmed caught here", () => {
+  describe("teeth: the same evasions that defeated the sibling's line-anchored guard, plus the round-4 regex bypass, confirmed caught here", () => {
     it("a multi-line named import — the exact Prettier shape that defeated decision-engine's original matcher", () => {
       const source = ["import {", "  readFileSync,", "  writeFileSync,", '} from "node:fs";'].join("\n");
-      const { specifiers } = tokenize(source);
+      const { specifiers } = analyzeSource(source);
       expect(specifiers).toEqual([{ specifier: "node:fs", line: 4 }]);
       expect(resolvesInsideAllowedRoots(FROM_ADAPTER, specifiers[0]!.specifier)).toBe(false);
     });
 
     it("a template-literal dynamic import with no interpolation", () => {
-      const { specifiers } = tokenize("const mod = await import(`openai`);");
+      const { specifiers } = analyzeSource("const mod = await import(`openai`);");
       expect(specifiers).toEqual([{ specifier: "openai", line: 1 }]);
       expect(resolvesInsideAllowedRoots(FROM_ADAPTER, specifiers[0]!.specifier)).toBe(false);
     });
 
     it("a bare require()", () => {
-      const { specifiers } = tokenize('const http = require("node:http");');
+      const { specifiers } = analyzeSource('const http = require("node:http");');
       expect(specifiers).toEqual([{ specifier: "node:http", line: 1 }]);
       expect(resolvesInsideAllowedRoots(FROM_ADAPTER, specifiers[0]!.specifier)).toBe(false);
     });
 
     it("a side-effect-only bare import", () => {
-      const { specifiers } = tokenize('import "some-polyfill";');
+      const { specifiers } = analyzeSource('import "some-polyfill";');
       expect(specifiers).toEqual([{ specifier: "some-polyfill", line: 1 }]);
       expect(resolvesInsideAllowedRoots(FROM_ADAPTER, specifiers[0]!.specifier)).toBe(false);
     });
 
     it("fetch called after whitespace, and fetch called with a preceding newline (both real reformatting shapes)", () => {
-      expect(tokenize("fetch (url)").bareFetchCalls).toEqual([{ line: 1 }]);
-      expect(tokenize("const x =\n  fetch(url)").bareFetchCalls).toEqual([{ line: 2 }]);
+      expect(analyzeSource("fetch (url)").bareFetchCalls).toEqual([{ line: 1 }]);
+      expect(analyzeSource("const x =\n  fetch(url)").bareFetchCalls).toEqual([{ line: 2 }]);
     });
 
     it("fetch reached via a template-literal-wrapped identifier is still a bare call, not a specifier — confirms the fetch scan and the specifier scan don't blind each other", () => {
       const source = 'const result = fetch(`https://example.com/${id}`);';
-      expect(tokenize(source).bareFetchCalls).toEqual([{ line: 1 }]);
+      expect(analyzeSource(source).bareFetchCalls).toEqual([{ line: 1 }]);
+    });
+
+    it("EXPLOIT REGRESSION (independent verification, round 3): a bare fetch(...) call hidden inside a template-literal ${...} interpolation is caught", () => {
+      const source = 'export const x = `${await fetch("https://example.com")}`;';
+      const { bareFetchCalls } = analyzeSource(source);
+      expect(bareFetchCalls).toEqual([{ line: 1 }]);
+    });
+
+    it("EXPLOIT REGRESSION variant: a non-relative specifier hidden inside a ${...} interpolation (a dynamic import assembled inside the interpolation) is also caught", () => {
+      const source = "export const x = `${(() => import(`openai`))()}`;";
+      const { specifiers } = analyzeSource(source);
+      expect(specifiers).toContainEqual({ specifier: "openai", line: 1 });
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "openai")).toBe(false);
+    });
+
+    it("EXPLOIT REGRESSION variant: fetch(...) nested two interpolations deep is still caught — a real parser has no notion of 'nesting too deep to track'", () => {
+      const source = "export const x = `${`${await fetch(\"https://example.com\")}`}`;";
+      const { bareFetchCalls } = analyzeSource(source);
+      expect(bareFetchCalls).toEqual([{ line: 1 }]);
+    });
+
+    it("EXPLOIT REGRESSION (independent verification, round 4 — the tokenizer-ending bypass): a regex literal containing a backtick no longer swallows the rest of the file as inert string content", () => {
+      const exploit = ["const re = /`/;", 'fetch("https://evil.example");', ""].join("\n");
+      const control = ["const re = 1;", 'fetch("https://evil.example");', ""].join("\n");
+
+      // Confirm the control case behaves as expected on its own terms —
+      // this is what the exploit ALSO must produce, once fixed.
+      expect(analyzeSource(control).bareFetchCalls).toEqual([{ line: 2 }]);
+
+      expect(analyzeSource(exploit).bareFetchCalls).toEqual([{ line: 2 }]);
+    });
+
+    it("EXPLOIT REGRESSION variant (round 4): the same regex-backtick shape hiding a non-relative import specifier, not just fetch(", () => {
+      const exploit = ['const re = /`/;', 'import openai from "openai";', ""].join("\n");
+      const { specifiers } = analyzeSource(exploit);
+      expect(specifiers).toEqual([{ specifier: "openai", line: 2 }]);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "openai")).toBe(false);
+    });
+
+    it("a dynamically COMPUTED import specifier is now flagged outright — previously an explicitly disclosed, undetectable gap; the AST sees the call is an import regardless of its argument's shape", () => {
+      const source = ["const specifierVar = \"openai\";", "import(specifierVar);", ""].join("\n");
+      const { specifiers } = analyzeSource(source);
+      expect(specifiers).toEqual([{ specifier: "specifierVar", line: 2 }]);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "specifierVar")).toBe(false);
     });
   });
 
   describe("false-positive discipline: only real specifiers/calls, never identifiers, comments, or unrelated strings", () => {
     it("does NOT flag a relative import whose filename merely contains the word 'fetch'", () => {
-      const { specifiers } = tokenize('import { helper } from "./fetchable-helpers.js";');
+      const { specifiers } = analyzeSource('import { helper } from "./fetchable-helpers.js";');
       expect(specifiers).toEqual([{ specifier: "./fetchable-helpers.js", line: 1 }]);
       expect(resolvesInsideAllowedRoots(FROM_ADAPTER, specifiers[0]!.specifier)).toBe(true);
     });
 
     it("does NOT flag `obj.fetch(...)` — a property access, not the global function", () => {
-      expect(tokenize("cache.fetch(key)").bareFetchCalls).toEqual([]);
+      expect(analyzeSource("cache.fetch(key)").bareFetchCalls).toEqual([]);
     });
 
     it("does NOT flag an identifier that merely contains 'fetch' as a substring, e.g. `refetchAll()` or `myFetcher()`", () => {
-      expect(tokenize("refetchAll()").bareFetchCalls).toEqual([]);
-      expect(tokenize("myFetcher()").bareFetchCalls).toEqual([]);
+      expect(analyzeSource("refetchAll()").bareFetchCalls).toEqual([]);
+      expect(analyzeSource("myFetcher()").bareFetchCalls).toEqual([]);
     });
 
-    it("does NOT flag a comment that mentions fetch/openai/node: by name — comments are stripped, not scanned", () => {
+    it("does NOT flag a comment that mentions fetch/openai/node: by name — comments are not part of the AST at all", () => {
       const source = [
         "// This module must never call fetch() or import openai or node:http.",
         "/* also never require('node-fetch') */",
         'import { helper } from "./helper.js";',
       ].join("\n");
-      const { specifiers, bareFetchCalls } = tokenize(source);
+      const { specifiers, bareFetchCalls } = analyzeSource(source);
       expect(specifiers).toEqual([{ specifier: "./helper.js", line: 3 }]);
       expect(bareFetchCalls).toEqual([]);
     });
 
-    it('does NOT false-positive on this very file\'s own sanity-test strings, which embed literal "fetch(" and "from \\"openai\\"" text purely as DATA', () => {
+    it('does NOT false-positive on a string literal that embeds literal "fetch(" and \'from "openai"\' text purely as DATA', () => {
       // This is the exact hazard framework-free.test.ts's header names by
       // name: a naive whole-file regex over raw text would find these
-      // patterns inside the STRING LITERALS in this very describe block
-      // and flag this file for violating the rule it tests. The line
-      // below reproduces that hazard as an isolated check.
+      // patterns inside a STRING LITERAL and flag it for violating the
+      // rule it merely mentions. A real parser treats a string literal's
+      // contents as a VALUE, never re-interpreting them as code.
       const line = 'const example = \'const x = fetch("y"); import z from "openai";\';';
-      const { specifiers, bareFetchCalls } = tokenize(line);
-      expect(specifiers).toEqual([]); // the outer string is one opaque token; its own contents are never independently re-scanned.
+      const { specifiers, bareFetchCalls } = analyzeSource(line);
+      expect(specifiers).toEqual([]);
       expect(bareFetchCalls).toEqual([]);
+    });
+
+    it("does NOT overtighten: a template literal containing the WORD 'await' as prose (no interpolation at all) is not flagged", () => {
+      const source = 'const msg = `please await nothing here, it is just words`;';
+      const { specifiers, bareFetchCalls } = analyzeSource(source);
+      expect(specifiers).toEqual([]);
+      expect(bareFetchCalls).toEqual([]);
+    });
+
+    it("does NOT overtighten: a benign NESTED template literal inside an interpolation is not flagged", () => {
+      const source = "const msg = `outer ${`inner ${name} text`} more`;";
+      const { specifiers, bareFetchCalls } = analyzeSource(source);
+      expect(specifiers).toEqual([]);
+      expect(bareFetchCalls).toEqual([]);
+    });
+
+    it("does NOT overtighten: an ordinary interpolation like `${count} items` is not flagged", () => {
+      const source = "const label = `${count} items`;";
+      const { specifiers, bareFetchCalls } = analyzeSource(source);
+      expect(specifiers).toEqual([]);
+      expect(bareFetchCalls).toEqual([]);
+    });
+
+    it("does NOT overtighten: a legitimate relative import specifier written inside a benign interpolation is still accepted, not merely un-flagged", () => {
+      const source = "const mod = `${(() => import(`./adapter.js`))()}`;";
+      const { specifiers } = analyzeSource(source);
+      expect(specifiers).toContainEqual({ specifier: "./adapter.js", line: 1 });
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "./adapter.js")).toBe(true);
+    });
+
+    it("does NOT overtighten: an ordinary regex literal used for real string matching, with no backtick inside it, parses and scans normally", () => {
+      const source = ["const isDigits = /^[0-9]+$/;", 'fetch("https://evil.example");', ""].join("\n");
+      expect(analyzeSource(source).bareFetchCalls).toEqual([{ line: 2 }]);
     });
 
     it("does not false-positive on ordinary relative imports already used throughout this milestone", () => {
@@ -640,9 +869,45 @@ describe("lib/simulate/** never reaches an LLM, the network, or a Node built-in"
     expect(files.some((f) => f.includes("__tests__"))).toBe(false);
   });
 
-  it("sanity: this repo's OWN lib/simulate/** source passes both checks right now (a true positive on the real codebase, not just synthetic fixtures)", () => {
-    const { specifierOffenders, fetchOffenders } = scan();
+  it("sanity: this repo's OWN lib/simulate/** source passes all three checks right now (a true positive on the real codebase, not just synthetic fixtures)", () => {
+    const { specifierOffenders, fetchOffenders, parseOffenders } = scan();
     expect(specifierOffenders).toEqual([]);
     expect(fetchOffenders).toEqual([]);
+    expect(parseOffenders).toEqual([]);
+  });
+
+  describe("EXPLOIT REGRESSION (independent verification, round 5): syntax errors defeated the real parser's error recovery the same way earlier rounds defeated the tokenizer — the bug class MOVED, not closed, until diagnostics are checked", () => {
+    it("[HIGH] an unterminated template literal (a syntax error) fails closed instead of silently swallowing a real fetch(...) call", () => {
+      const exploit = ["const x = `unterminated", 'fetch("https://evil.example");', ""].join("\n");
+      expect(() => analyzeSource(exploit)).toThrow(UnparseableFileError);
+      expect(() => analyzeSource(exploit)).toThrow(/could not parse/);
+    });
+
+    it("[HIGH] a broken function signature (a syntax error) also fails closed", () => {
+      const exploit = ["function broken( {", 'fetch("https://evil.example");', ""].join("\n");
+      expect(() => analyzeSource(exploit)).toThrow(UnparseableFileError);
+      expect(() => analyzeSource(exploit)).toThrow(/could not parse/);
+    });
+
+    it("does NOT overtighten: the equivalent CLEAN input (no syntax error) still scans normally, proving the fail-closed path is triggered by the diagnostic, not by the shape of the snippet", () => {
+      const control = ["const x = 1;", 'fetch("https://evil.example");', ""].join("\n");
+      expect(analyzeSource(control).bareFetchCalls).toEqual([{ line: 2 }]);
+    });
+
+    it("[MEDIUM] a re-export (`export ... from` / `export * from`) was never checked for its specifier — closed alongside the specifier extraction rewrite", () => {
+      expect(analyzeSource('export { helper } from "openai";').specifiers).toEqual([{ specifier: "openai", line: 1 }]);
+      expect(analyzeSource('export * from "openai";').specifiers).toEqual([{ specifier: "openai", line: 1 }]);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "openai")).toBe(false);
+    });
+
+    it("does NOT overtighten: a re-export with no `from` clause at all (`export { helper };`) has no specifier to find, and is not flagged", () => {
+      expect(analyzeSource("const helper = 1;\nexport { helper };\n").specifiers).toEqual([]);
+    });
+
+    it("does NOT overtighten: a legitimate relative re-export is still accepted, not merely un-flagged", () => {
+      const result = analyzeSource('export { helper } from "./helper.js";');
+      expect(result.specifiers).toEqual([{ specifier: "./helper.js", line: 1 }]);
+      expect(resolvesInsideAllowedRoots(FROM_ADAPTER, "./helper.js")).toBe(true);
+    });
   });
 });

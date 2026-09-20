@@ -49,19 +49,28 @@ import type { Json } from "../contracts/index.js";
  * "expression language nobody asked for" ADR 0001 already declined to
  * build for `Delta.kind` itself.
  *
- * THIS ASSUMPTION IS SHARED WITH `consistency.ts`, NOT UNIQUE TO THIS
- * FILE — a forward note added after independent verification flagged
- * that only THIS file's header named it. The "no array-index syntax,
- * `\"append\"` creates a leaf that did not exist before" assumption is
- * load-bearing in TWO places: this file's own `setAtPath`/`deleteAtPath`,
- * AND `consistency.ts`'s Layer-1 `"append"` handling (`checkClaimedBefore`
- * there treats "the path already has a value" as a contradiction of
- * `"append"`'s own claimed shape). A future milestone reopening this
- * assumption — to add array-index paths, or to model a collection as a
- * single array field appended-to rather than as one new key per item —
- * must update BOTH files together, or `consistency.ts` will keep
- * enforcing a rule `path.ts` no longer actually implements. See
- * `consistency.ts`'s own header for the matching cross-reference.
+ * CORRECTED (this note was stale, flagged by independent verification):
+ * this file's header used to say `consistency.ts`'s Layer-1 `"append"`
+ * handling treated "the path already has a value" as a contradiction of
+ * `"append"`'s own claimed shape, load-bearing in tandem with this file's
+ * own "no array-index syntax" scope. That is NO LONGER TRUE —
+ * `consistency.ts`'s `checkClaimedBefore` was reopened once ADR 0004
+ * (`.genesis/decisions/0004-rollback.md`, M5) established `before`/
+ * `after` as whole-value snapshots for every `kind`: an `"append"` can
+ * now legitimately target a path that already holds a value (growing an
+ * existing array), and `checkClaimedBefore` accepts that, checking only
+ * that the claimed `before` is honest — see `consistency.ts`'s own
+ * "REOPENED" header note for the full argument.
+ *
+ * WHAT THIS FILE'S OWN SCOPE STATEMENT DOES NOT CLAIM, TO AVOID THE SAME
+ * STALENESS AGAIN: this file's "no array-index syntax" choice (above) is
+ * UNCHANGED and not affected by that reopening — a whole-array-snapshot
+ * `append` still names its collection by an ordinary object key (e.g.
+ * `"attendees"`), never by a numeric index into one, so `getAtPath`/
+ * `setAtPath`/`deleteAtPath` never needed to change. What changed is only
+ * `consistency.ts`'s VALIDATION rule about what a prior value at that key
+ * is allowed to look like — a question this file's own primitives never
+ * answered or enforced in the first place.
  */
 
 function splitPath(path: string): readonly string[] {

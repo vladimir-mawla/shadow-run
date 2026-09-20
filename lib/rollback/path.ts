@@ -8,18 +8,17 @@
  * read (and tested) separately.
  *
  * KNOWN, NAMED DUPLICATION — not accidental, not hidden. M3's own
- * `lib/simulate/path.ts` (on the `m3-simulate` branch, not present on this
- * worktree) independently implements forward-delta-application logic that
- * overlaps with what this file does, and M3's own notes flag it as a
- * duplicate of logic M5 was always meant to own canonically (plan §A.4:
- * "the exact same generic interpreter M3/M4 use to apply deltas forward").
- * This file is that canonical version. Resolving the duplication (M3
- * importing from here, or from a shared location) is left for whichever
- * loop merges M3 and M5 together — `lib/simulate/**` is a different
- * milestone's frozen boundary and is not touched from here, and M3/M4 are
- * still being built and verified on their own branches as this is written,
- * so there is nothing to reconcile against yet. See `.genesis/decisions/
- * 0004-rollback.md` for the full note.
+ * `lib/simulate/path.ts` independently implements forward-delta-application
+ * logic that overlaps with what this file does, and M3's own notes flag it
+ * as a duplicate of logic M5 was always meant to own canonically (plan
+ * §A.4: "the exact same generic interpreter M3/M4 use to apply deltas
+ * forward"). This file is that canonical version. M3 has since merged and
+ * `lib/simulate/path.ts` IS present on this worktree — resolving the
+ * duplication (M3 importing from here, or from a shared location) remains
+ * unresolved, but is left for whichever loop takes it on, not this one;
+ * `lib/simulate/**` is a different milestone's frozen boundary and is not
+ * touched from here. See `.genesis/decisions/0004-rollback.md` for the full
+ * note.
  *
  * WHY `Delta.before`/`after` ARE TREATED AS WHOLE-VALUE SNAPSHOTS AT
  * `path`, FOR ALL FOUR `Delta.kind` VALUES — THE ONE DESIGN DECISION THIS
