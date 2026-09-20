@@ -1,82 +1,73 @@
 # CURRENT
-- active_loop: M2 (deploy a live skeleton to Vercel — the second milestone on `.genesis/PLAN.md`), branch
-  `m2-deploy`, opened against `main`. M1's commits (`lib/contracts/**`, ADR 0001) landed directly on `main`
-  through a repo-setup error that has since been cleaned up — normal branch/PR flow resumes with this
-  milestone. M1 passed independent (L4) verification; its fixes (`makeWorld`, `deepFreezeClone`, accessor
-  rejection, scoped claims — see `m1-fixes`, PR #3) merged to `main` and are now folded into `m2-deploy` via
-  `git merge main`. M1 is marked `done` in `.genesis/DONE.html` and `app/milestones.ts` as of this session.
-  This M2 session addressed independent-verification findings against the M2 work itself, across five
-  rounds (each later round attacked the previous round's own fix rather than taking it on faith): (1) the
-  drift guard's regex matched the first pill-ish span anywhere in a row instead of the real status pill —
-  fixed to anchor on the row's last `<td>` and match the `pill` class as an exact token, not a prefix; (2)
-  that first fix still used a non-`g` `.match()` inside the last cell, so a SECOND exact-token pill span in
-  that cell would still win by appearing first — fixed by requiring the cell's entire trimmed content to be
-  exactly one pill element (`^`/`$`-anchored); (3) a stale comment on `app/api/health/route.ts`'s
-  `runtime = "nodejs"` declaration claimed it guarded against "an accident of a default that could change,"
-  which no longer holds on Next.js 16.3+ (`edge` is deprecated, Node.js is the unconditional default) —
-  comment corrected, declaration kept as explicit documentation; (4) `app/page.tsx`'s header comment stated
-  a specific done-count ("as of M2, zero milestones are marked done") that went stale the moment M1 was
-  marked done — replaced with prose describing that the count is computed, not asserting a number that can
-  drift again; (5) round 3 found the round-2 fix had overshot into rejecting ordinary, zero-risk edits — a
-  status word with a hyphen or digit (`"in-progress"`, `"wip2"`), an extra cosmetic class token
-  (`"pill ok extra"`), and a purely decorative nested icon span inside the pill all threw. Fixed (at the
-  time) by widening the status-text pattern, allowing further class tokens after `pill`, and tolerating a
-  nested element that carried no text of its own; (6) round 4 found that tolerating nested elements at all
-  had reopened a real bypass one level deeper — `<span class="pill todo"><b>done</b></span>` read as
-  "done" with no fake pill needed. Fixed (at the time) with a second, generic-tag depth walk requiring
-  nested elements to carry zero text; (7) round 5 found THAT fix had its own hole, through attribute
-  quoting: `<span class="pill todo"><i data-x="a/>done</i></span>` read as "done", because the depth
-  walk's tag-matching regex had no concept of a quoted attribute containing `>`. At this point the
-  decorative-icon case that started rounds 5–7's whole line of machinery was recognized as something
-  nobody had actually asked for — a speculative future convenience that had cost three straight rounds of
-  bypasses. So round 5's real fix REMOVED nested-element support entirely (deleting the generic tag-depth
-  walker, the `<span>`-specific one, and all self-closing detection) rather than patching it a fourth time:
-  the status cell must now match one single anchored shape,
-  `<span class="pill TOKENS">TEXT</span>` with no nested elements, comments, or extra attributes of any
-  kind, full stop. The three calibration wins that never needed nesting — hyphens/digits in the status
-  text, extra class tokens after `pill`, and whitespace padding around the cell — are kept. The diff for
-  this round was substantially negative (removed far more parsing machinery than it added).
-  `parsePillCellText`'s own comment records, explicitly, why nested-element support is gone: three
-  demonstrated bypasses (the fake nested pill, `<b>done</b>`, and the attribute-quoting case), so anyone
-  who later needs a decorative child must change this pattern deliberately, with tests for all three,
-  rather than relaxing it because it looks over-tight.
-- target: `app/api/health/**`, `vercel.json` (not added — see below), `next.config.*`, `package.json` only.
-  No `lib/**` change of any kind — `lib/contracts/**` stays frozen from M1. No simulate/reconcile/rollback
-  engine, no domains, no interactive demo (M3–M8).
-- what actually shipped: `app/api/health/route.ts` (HTTP 200/503, JSON body naming
-  `VERCEL_GIT_COMMIT_SHA` or an honest `"unknown (local dev)"` fallback, plus a real runtime check against
-  M1's `computeFingerprint`/`assertPlainData` — not a bare liveness ping); `app/milestones.ts` +
-  `app/milestones.test.ts` (the done-claim drift-guard mechanism, copied from decision-engine, checked
-  against `.genesis/DONE.html`'s own status table); `app/page.tsx` rewritten to read progress from that
-  module and state plainly that no simulator/reconciliation/rollback engine exists yet;
-  `next.config.ts`'s pre-existing worked-example comment corrected to reference this repo's own
-  verification instead of decision-engine's cost-model wording it had been carrying verbatim.
-  `.genesis/DONE.html`'s M2 row got one explicit note (no pill flipped) that no deployment exists yet.
-  No `vercel.json` — Next.js's zero-config detection is sufficient (matching decision-engine, which also
-  has none), so an empty placeholder file was deliberately not added. No new dependency in `package.json`.
-- verified, not merely claimed: `npm ci` clean (rolldown native binding survives). `npm run typecheck`
-  exits 0 on both tsconfigs. `npm test` runs 8 test files, 83 tests, all passing — measured fresh after the
-  `main` merge and all five verification-fix rounds, not assumed: `main`'s 7 files/59 tests, plus
-  `app/milestones.test.ts` alone now carrying 24 tests (the original 2; the decoy-row and no-pill-at-all
-  tests from round 1; round 2's attack suite — two-pills-both-orders, pill-plus-text both directions,
-  whitespace-only, empty cell, whitespace-padding-is-fine; round 3's still-rejected set — unclosed span,
-  self-closing pill span, duplicated identical pill, uppercase status text — plus its still-kept
-  calibration wins — hyphenated status, digit in status, extra class token; round 5's must-throw set for
-  nested elements of any kind — the three demonstrated bypasses by name, an empty nested element, and a
-  nested comment — plus an extra-attribute-on-the-pill-span case. The round-3/4 tests that asserted a
-  nested element could be ACCEPTED were deleted rather than left asserting removed behaviour.) `npm run
-  build` (`next build --webpack`) succeeds; the build's route summary shows `/api/health` as `ƒ`
-  (dynamic), not statically prerendered.
-  `npm run dev` + `curl -s -i http://localhost:3000/api/health` returned a real `200` with
-  `"commit":"unknown (local dev)"` when `VERCEL_GIT_COMMIT_SHA` was unset, and the real HEAD SHA verbatim
-  when it was set for the same run — both paths actually exercised, not assumed from reading the code.
-  `git diff main -- lib` is empty.
-- not done, and cannot be marked done from here: the actual Vercel deployment is a human step (account
-  import) this agent cannot perform and did not attempt — no signup, no guessed URL. The repo is
-  import-ready; the PR names the exact human steps and the command to confirm the deploy afterwards. M2
-  stays `todo` in both `.genesis/DONE.html` and `app/milestones.ts` until a real `$DEPLOY_URL` answers
-  `curl -sf $DEPLOY_URL/api/health` — it is not flipped just because the code is ready. The PR (#2) is
-  open, not merged.
-- PR history: M1's real history lives directly on `main` (see the now-superseded `m1-contracts-final`/#1,
-  closed) plus its independent-verification fixes on `m1-fixes`/#3 (merged to `main`). M2's work is on
-  `m2-deploy`/#2, open against `main`, not merged.
+
+- **active_loop:** M3 (`lib/simulate/**`) in final independent verification on branch `m3-simulate` (PR #5).
+  M6, M7 and M8 are designed but unbuilt — they depend on M3 landing.
+
+- **last updated:** 2026-09-20, after M4 and M5 merged. The previous revision of this file described M2 as
+  the active loop with PR #2 open, and stood unchanged for roughly eleven hours across two merged
+  milestones. That staleness was found by reconstructing this project's own history from `git log` and PR
+  comments rather than from this file — worth recording, because a checkpoint that lags the repo is worse
+  than no checkpoint: it is a stated claim that happens to be false.
+
+## Milestone state, as of this revision
+
+| | Status | Where |
+|---|---|---|
+| M1 contracts | **done** | `main`; built directly on `main` through a repo-setup error since cleaned up, fixes on `m1-fixes` (#3, merged) |
+| M2 deploy | **done** | `main` (#2, #4 merged). Live at `https://shadow-run-three.vercel.app` — `/api/health` returns 200 with the deployed SHA |
+| M3 simulate | `todo` | `m3-simulate` (#5), open. Built, rejected once, six findings fixed, final verification running |
+| M4 reconcile | **done** | `main` (#6, #7 merged) |
+| M5 rollback | **done** | `main` (#8 merged) |
+| M6 domains | `todo` | designed only — `scratchpad/m6-domain-cases.md`, no branch, no code |
+| M7 failure suite | `todo` | designed only — `scratchpad/m7-failure-suite.md` |
+| M8 demo | `todo` | designed only — `scratchpad/m8-demo-design.md` |
+| M9 deliverables | `todo` | thesis and process record drafted; architecture snapshot and README deliberately not drafted, since their content is "what was actually built and verified" |
+
+`main` carries `lib/contracts`, `lib/reconcile`, `lib/rollback` at **14 test files / 147 tests**.
+
+## What independent verification has actually caught
+
+Recorded because it is the substance of this project's discipline, and because reconstructing it later
+proved unreliable on the sibling project.
+
+- **M1** — `world.ts` documented `assertPlainData` as running "at every construction boundary... (`makeWorld`
+  below)" when no `makeWorld` existed anywhere; and an ordinary getter (`{ get x() { return n++; } }`)
+  satisfied `Json`, passed `isPlainData`, and returned a different value on every read, defeating the file's
+  own "same input, same fingerprint" premise with no cast involved. A later round found `makeWorld` neither
+  cloned nor froze its input, so a caller holding a reference could silently invalidate the fingerprint it
+  had just computed.
+- **M2** — five rounds against the drift guard in `app/milestones.test.ts`, each a real bypass: the first
+  `pill`-classed span in a row winning over the row's actual status pill; then the first match *within* the
+  last cell; then a tag-strip that let a nested `<b>done</b>` be read as the status of a `todo` pill; then a
+  tag scanner fooled by a `>` inside a quoted attribute. Resolved by deleting the nested-element support
+  entirely — a net **88 insertions / 198 deletions** — rather than adding a fifth layer of parsing.
+- **M3** — one formal rejection. `asProjectedEffect`, a bare zero-validation cast, was exported from the
+  public barrel, letting any caller bypass all four of `simulate()`'s fail-closed gates. The import
+  allowlist checked that a specifier *looked* relative rather than that it *resolved* inside the boundary,
+  so `../../node_modules/next/package.json` passed and was confirmed to resolve to a real directory. A
+  follow-up round found a real symlink inside `lib/simulate/` still defeated the fixed check, because
+  `path.resolve()` never dereferences symlinks while Node's module resolution does.
+- **M4** — a forward note was missing for M6/M8: `drifted.actual` may be *synthesized* rather than observed
+  and is structurally indistinguishable from a real one, while M8 renders it for a judge. Separately, a
+  comment described a danger the current pipeline does not have.
+- **M5** — approved. The decisive test built a genuine full-`World` collision (`{reserved:412789}` and
+  `{reserved:649192}` both hash to `2ba95242`) and confirmed `runRollback` still returns `"dishonest"`,
+  because deep-equality is what the pass/fail branch keys on. The disclosed weakness — a fabricated step
+  that applies cleanly but writes the wrong value is reported as `"restored"` on the default path — was
+  reproduced, judged a correct trade, and turned into a stated requirement on M6 in ADR 0004.
+
+## Known gaps in this repository's own record
+
+- `gh pr view N --json reviews` is empty for every PR: GitHub's formal review feature was never used.
+  Verification reports are posted as PR **comments**, and M4's and M5's were posted only retroactively —
+  after their merges — because the reports existed in the orchestration but had not been written anywhere
+  the repository could show.
+- "Finding 4" of M1's verification is absent. The fix list on PR #3 runs 1, 2, 3, 5, 6, and the gap is
+  real: finding 4 was a low-severity freeze-boundary precision note — that `next.config.ts`, `package.json`
+  and `app/**` already existed as of M1's commit sequence although `PLAN.md` assigns them to M2 — judged
+  well-founded bootstrapping (Next's own tsconfig fails with zero files under `app/`) and deliberately not
+  fixed. That decision was never recorded, which is why it reads as a gap.
+- This file has never contained a `model:` field in any revision, so which model built which milestone is
+  not recoverable from the repository at all. Note that the `Co-Authored-By` trailer on every commit is a
+  fixed string written by the orchestrating harness regardless of which model did the work — it is not
+  evidence of authorship and must not be read as such.

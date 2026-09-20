@@ -24,9 +24,23 @@ export default defineConfig({
     environment: "node",
     // app/ is included so a later milestone's drift guard (mirroring
     // decision-engine's) can run. The dependency direction is unaffected:
-    // app/ and components/ may import lib/, never the reverse, and no lib/
-    // test imports anything under either.
-    include: ["lib/**/*.test.ts", "app/**/*.test.ts", "components/**/*.test.ts", "tests/**/*.test.ts"],
+    // app/, components/ and domains/ may import lib/, never the reverse, and no
+    // lib/ test imports anything under any of them.
+    //
+    // "domains/**/*.test.ts" was added at M6, "components/**/*.test.ts" at M8,
+    // each following the pre-added-ahead-of-need precedent this file set for
+    // app/** and tests/**. Neither edit touches a frozen boundary: it only
+    // teaches vitest where each milestone's own tests live. This union was a
+    // merge conflict -- M8's branch predated M6 landing -- and both entries are
+    // required, so dropping either would silently stop running a whole
+    // milestone's tests.
+    include: [
+      "lib/**/*.test.ts",
+      "app/**/*.test.ts",
+      "components/**/*.test.ts",
+      "domains/**/*.test.ts",
+      "tests/**/*.test.ts",
+    ],
     watch: false,
   },
 });
