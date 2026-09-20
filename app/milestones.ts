@@ -19,15 +19,16 @@
  * enforces that the *set of milestones claimed done* never drifts from
  * .genesis/DONE.html, even if this comment is forgotten.
  *
- * STATUS AS OF M2: nothing in .genesis/DONE.html's status table is marked
- * `done` yet — M1's code is built and frozen (lib/contracts/**) but is
- * still awaiting independent (L4) verification per this account's
- * standing rule that a milestone is only `done` once a separate agent
- * confirms it, never by the building agent's own say-so. So M1 is marked
- * "in-progress" here, not "done" — matching DONE.html rather than getting
- * ahead of it. M2 (this milestone) is also "in-progress": the code in this
- * PR is import-ready, but the actual Vercel deployment is a human step
- * that has not happened yet (see README/PR for the exact steps).
+ * STATUS AS OF M2's verification-fix pass: M1 passed independent (L4)
+ * verification and its fixes (`makeWorld`, `deepFreezeClone`, accessor
+ * rejection, scoped claims) merged to `main` — so M1 is marked "done" here,
+ * matching the "done" pill now on its row in .genesis/DONE.html. M2 (this
+ * milestone) stays "in-progress": the code in this PR is import-ready, but
+ * the actual Vercel deployment is a human step that has not happened yet
+ * (see README/PR for the exact steps), and per this account's standing
+ * rule a milestone is only `done` once a separate agent confirms it against
+ * a real, running deployment — never by the building agent's own say-so
+ * because the code looks ready.
  */
 export interface Milestone {
   readonly id: number;
@@ -36,7 +37,7 @@ export interface Milestone {
 }
 
 export const MILESTONES: readonly Milestone[] = [
-  { id: 1, title: "Contracts: World, ProjectedEffect, Reconciliation, Rollback", status: "in-progress" },
+  { id: 1, title: "Contracts: World, ProjectedEffect, Reconciliation, Rollback", status: "done" },
   { id: 2, title: "Deploy a live skeleton to Vercel", status: "in-progress" },
   { id: 3, title: "The shadow-execution engine (simulate())", status: "planned" },
   { id: 4, title: "Reconciliation and the trust feedback loop", status: "planned" },
