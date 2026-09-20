@@ -31,9 +31,17 @@ empty at every commit in this branch, not merely at the end.
   structural barrier against Approach A (`sim-plan.md` §A.2) on top of the grep-based architectural test
   (`__tests__/architecture.test.ts`) — nearly every real way to reach an LLM or a third-party API from Node
   requires `Promise`, so forbidding it at the type level closes an entire class of evasion the grep test
-  cannot enumerate ahead of time. Stated honestly: this does not make an async call absolutely impossible
-  (a sufficiently determined implementation could bridge to a blocking synchronous call), but it forecloses
-  every ordinary path, matching the plan's own "structural, not by promise" standard.
+  cannot enumerate ahead of time. **Stated honestly, and tightened after independent verification:** the
+  gap here is not merely "a sufficiently determined implementation could bridge to a blocking synchronous
+  call" — it is an ORDINARY one, confirmed working end to end: ESM top-level `await`, run once at module
+  initialization, prefetches a real network/LLM response before `project()` is ever called, so `project()`
+  itself is genuinely synchronous by every measure this milestone can check, and `simulate()` accepts it
+  cleanly (`ok: true`, returning the prefetched value). The grep-based architectural test cannot help here
+  even in principle, for a reason worth stating precisely: that test's frozen boundary is `lib/simulate/**`;
+  a real domain adapter's own module lives in `domains/**` (M6's directory), so there is no file inside this
+  milestone's scan for the grep test to have read in the first place. This is a real, named, unresolved gap
+  for M6 to inherit — not something this milestone's synchronous-signature choice actually closes, even
+  though it still closes every path that requires an in-`project()` `await`.
 - **Chosen:** `SimulationAdapter<TState>.project: (action: Action, world: World<TState>) => ProjectedEffect`
   — synchronous, and `world` is never the caller's live object (see Decision 2). `Action` had to be defined
   in this milestone's own files (`action.ts`) because `lib/contracts/**` never defined it — confirmed by
@@ -165,10 +173,12 @@ without wrapping its transaction in something synchronous — realistic for this
 but a real limitation for any future domain that isn't. Recorded here for M6 to inherit, not rediscovered
 independently.
 
-## Decision 6 — Purity: detected, not structurally prevented — said so, not claimed otherwise
+## Decision 6 — Purity: detected, not structurally prevented — said so, not claimed otherwise, and scoped to what is actually checked
 
 The build brief asks directly whether the engine can *structurally* prevent an impure adapter or only
-*detect* one, and warns against claiming more than is true. **The honest answer: only detected.**
+*detect* one, and warns against claiming more than is true. **The honest answer: only detected — and even
+"detected" is narrower than the first draft of this ADR and its accompanying comments stated,** tightened
+after independent verification named the gap precisely rather than leaving it as an abstract disclaimer.
 `simulate()`'s own body is provably deterministic (no `Date.now()`, no `Math.random()`, no output built by
 iterating a `Set`/`Map` in an order this engine itself introduces — `effect-validation.ts` and
 `consistency.ts` both iterate the ADAPTER's own arrays in the order the adapter supplied them). But nothing
@@ -177,10 +187,50 @@ stops the function's BODY from reading the clock or a random source; no test can
 over arbitrary future domain code, the same limit `world.ts`'s "known, unclosed gap" paragraph already
 states honestly for a hostile `Proxy` defeating `isPlainData`, one layer over.
 
+**The precise, narrower claim, with the concrete gaps named rather than left abstract** (see `simulate.ts`'s
+own header for the same three points in situ): what is actually detected is impurity that MANIFESTS IN THE
+RETURNED `ProjectedEffect` BETWEEN TWO CALLS WITH IDENTICAL INPUT. Confirmed by independent verification to
+NOT cover, specifically:
+
+1. An adapter that reads `Date.now()`/`Math.random()` on every call but never lets the result reach the
+   returned `deltas`/`resultingFingerprint` — the side effect is real; a check that only ever compares
+   OUTPUTS cannot see it.
+2. An adapter impure only from its Nth call onward (an internal counter, a cache that fills after a few
+   calls) — a test that calls it two or three times cannot see impurity that needs more repetitions than
+   that.
+3. An adapter impure only for an input this milestone's tests never happened to exercise.
+
 `__tests__/purity.test.ts` proves both halves rather than only the flattering one: the positive case (a
 real deterministic fixture adapter, called three times with identical input, produces deep-equal output
-every time) AND a deliberately-impure fixture adapter (`Math.random()` inside `project()`) whose repeat
-calls do **not** agree — demonstrating the gap honestly rather than asserting it doesn't exist.
+every time) AND a deliberately-impure fixture adapter (`Math.random()` inside `project()`, whose result DOES
+reach the returned effect) whose repeat calls do **not** agree — demonstrating the ONE shape of impurity
+this milestone can actually detect, not impurity in general.
+
+## Decision 7 — Does `Delta.kind` get checked against its own `before`/`after`?
+
+Added after independent verification confirmed both `{ kind: "increment", before: 39, after: "banana" }`
+and `{ kind: "increment", before: 39, after: 10 }` (a decrease labeled an increment) passed
+`effect-validation.ts` cleanly. `delta.ts`'s own header calls `increment`, by name, "a signed numeric
+change to a counter" — a declared meaning this file was silently not checking at all.
+
+**Alternatives considered:**
+
+- **Check nothing** (the original state). Rejected on reflection: `kind`'s declared meaning is part of
+  `Delta`'s own contract (`lib/contracts/delta.ts`), not an invented rule — a shape check that validates
+  `kind` is one of the four closed strings but never asks whether the REST of the object is coherent with
+  the one it picked is checking less than its own stated job ("this file checks SHAPE").
+- **Enforce numeric type AND non-negative direction** (reject a decrease under `"increment"`). Rejected:
+  `delta.ts` says "signed" — a decrement expressed as `kind: "increment"` with `after < before` is exactly
+  what "signed" means, and rejecting it would invent a constraint the type never states, over-constraining
+  in the opposite direction from the original gap.
+- **Extend the same numeric check to `set`/`remove`/`append`.** Rejected: `delta.ts` makes no numeric claim
+  for any of the other three kinds — `set` legitimately replaces a scalar with a wholesale different shape
+  (object, string, boolean), and `remove`/`append` carry whatever the domain's real data holds. Extending a
+  numeric constraint to them would be validating a rule `Delta`'s own type never asserts.
+- **Chosen:** enforce exactly one, narrow rule — for `kind === "increment"`, both `before` and `after` must
+  be finite numbers. Nothing about sign or direction. This is the smallest check that makes the shape
+  validator's behavior match `Delta`'s own declared contract for the one kind that makes a numeric claim,
+  and no more.
 
 ## Consequences
 
@@ -193,15 +243,27 @@ calls do **not** agree — demonstrating the gap honestly rather than asserting 
 - Negative / cost: `path.ts` narrowly duplicates a sliver of what M5's `lib/rollback` `applyDeltas` will
   own. Accepted and recorded as a forward note (Decision 4) rather than hidden, because deferring the
   self-consistency check until M5 exists would have thrown away a cheap, strong guarantee this milestone
-  could honestly build now.
+  could honestly build now. **This same assumption — that a `Delta.path` names one exact leaf, and that
+  `"append"` means the leaf did not exist before — is ALSO load-bearing in `consistency.ts`'s Layer-1
+  `"append"` handling, not only in `path.ts`. A future reopening of this assumption (M5 or M6) must update
+  both files together; `path.ts`'s own header now cross-references this note so the two don't drift apart
+  silently.**
 - Negative / cost: requiring `project()` to be synchronous (Decision 1) forecloses a genuine, real-store
-  Approach-B implementation over an async-only transactional substrate. Accepted for this plan's own demo
-  domains (all synthetic and in-memory per §0.4) and recorded as a forward note for M6 if that ever stops
-  being true.
-- Negative / cost, stated honestly: purity is DETECTED, not structurally GUARANTEED, for an adapter's own
-  internal behavior. This is the one success criterion this milestone can only partially deliver on by
-  construction, and `simulate.ts`'s header, `adapter.ts`'s header, and `__tests__/purity.test.ts` all say so
-  in the same words rather than three different, slightly-differently-hedged claims.
+  Approach-B implementation over an async-only transactional substrate, AND — confirmed by independent
+  verification, not merely a theoretical residual — does not foreclose an adapter module prefetching a real
+  network/LLM call via ESM top-level `await`, which the grep-based architectural test cannot see because a
+  real adapter's module lives in `domains/**`, outside `lib/simulate/**`'s scanned boundary entirely.
+  Accepted for this plan's own demo domains (all synthetic and in-memory per §0.4) and recorded as a named,
+  unresolved forward note for M6, not something this milestone's synchronous-signature choice actually
+  closes.
+- Negative / cost, stated honestly and narrowly: purity is DETECTED, not structurally GUARANTEED, for an
+  adapter's own internal behavior — and even that detection is scoped to impurity that manifests in the
+  RETURNED effect between two calls with identical input, confirmed (Decision 6) to miss an adapter that
+  reads the clock/randomness without using it, one that only turns impure after several calls, or one that
+  is impure only for an untested input. This is the one success criterion this milestone can only partially
+  deliver on by construction, and `simulate.ts`'s header, `adapter.ts`'s header, this ADR, and
+  `__tests__/purity.test.ts` all now say so in the same, narrowly-scoped words rather than several
+  differently-hedged claims.
 
 ## Alternatives rejected (summary, cross-referenced above)
 

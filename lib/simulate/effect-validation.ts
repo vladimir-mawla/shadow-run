@@ -32,6 +32,20 @@ import type { AssumptionKind, Delta, ProjectedEffect } from "../contracts/index.
  * predicts, and conflating "is this the right shape" with "is this true"
  * into one function would make it harder to name, in a failure report,
  * which of the two problems actually occurred.
+ *
+ * ONE EXCEPTION TO "SHAPE ONLY," ADDED AFTER INDEPENDENT VERIFICATION
+ * FOUND IT MISSING: `Delta.kind`'s own DECLARED MEANING was never checked
+ * against its `before`/`after` values at all — `{ kind: "increment",
+ * before: 39, after: "banana" }` passed clean, even though `delta.ts`'s
+ * own header defines `increment` as "a signed numeric change to a
+ * counter." `validateDeltaShape` (below) now enforces exactly that one
+ * coherence rule — `before`/`after` must both be finite numbers when
+ * `kind === "increment"` — and no other. It deliberately does NOT check
+ * the sign of the change (`after < before` under `"increment"` is a
+ * legitimate decrement, per `delta.ts`'s own "signed" wording) and it
+ * does NOT extend any numeric constraint to `set`/`remove`/`append`,
+ * whose `before`/`after` `delta.ts` never claims are numeric. See that
+ * function's own comment for the full reasoning.
  */
 
 /** One structural problem found in a value that was supposed to be a `ProjectedEffect`. Free text is fine here — this describes why THIS ENGINE rejected a malformed value, not a claim a projection makes about the world; see `result.ts`'s header for why that distinction matters and does not reopen the "no free text" discipline `ProjectedEffect.assumptions` itself is held to. */
@@ -71,6 +85,38 @@ function validateDeltaShape(value: unknown, index: number, problems: EffectShape
   // `before`/`after` are `unknown` by design (delta.ts) — nothing to validate about their shape beyond "the key exists," which `in` (not a presence-of-undefined check) verifies honestly even when the real value is `undefined`.
   if (!("before" in value)) problems.push(`deltas[${index}] is missing "before"`);
   if (!("after" in value)) problems.push(`deltas[${index}] is missing "after"`);
+
+  // ONE deliberate exception to "before/after are unknown, nothing to
+  // validate about their shape": `kind: "increment"`. `delta.ts`'s own
+  // header defines increment, by name, as "a signed numeric change to a
+  // counter" — that is `Delta`'s own declared meaning for this one kind,
+  // not an invented constraint, and it was being silently ignored:
+  // independent verification confirmed `{ kind: "increment", before: 39,
+  // after: "banana" }` passed this file's shape check with zero problems
+  // (a non-numeric "increment" is nonsense on its face and cheap to
+  // reject here, rather than only surfacing three steps later as a
+  // confusing NaN inside `consistency.ts`'s fingerprint math or,
+  // depending on what `computeFingerprint(JSON.stringify(...))` does with
+  // a string where a number was expected, silently "succeeding" with the
+  // wrong claim). DELIBERATELY NOT checked: the SIGN or DIRECTION of the
+  // change — `after < before` under `kind: "increment"` is a legitimate
+  // decrement (`delta.ts`: "a signed numeric change"), and rejecting it
+  // would be inventing a constraint `Delta`'s own type never states,
+  // exactly the over-constraining the finding that prompted this check
+  // warned against. Every OTHER kind keeps its `before`/`after` fully
+  // open: `set` can legitimately replace a scalar with a wholesale
+  // different shape (object, string, ...), and `remove`/`append`'s
+  // values are whatever the domain's real data holds — `delta.ts` makes
+  // no numeric claim for any of the other three, so this file makes none
+  // either.
+  if (value["kind"] === "increment") {
+    if (typeof value["before"] !== "number" || !Number.isFinite(value["before"])) {
+      problems.push(`deltas[${index}] has kind "increment" but "before" is not a finite number, got ${JSON.stringify(value["before"])} — delta.ts defines increment as "a signed numeric change to a counter"`);
+    }
+    if (typeof value["after"] !== "number" || !Number.isFinite(value["after"])) {
+      problems.push(`deltas[${index}] has kind "increment" but "after" is not a finite number, got ${JSON.stringify(value["after"])} — delta.ts defines increment as "a signed numeric change to a counter"`);
+    }
+  }
 }
 
 /**

@@ -144,6 +144,42 @@ describe("simulate() end to end: the four fail-closed gates", () => {
     }
   });
 
+  it("GATE 3 (malformed-effect), MEDIUM-3 regression: an 'increment' delta whose after is non-numeric is rejected — delta.ts defines increment as a signed numeric change, and this was previously never checked", () => {
+    const nonsenseIncrementAdapter = {
+      project: () => ({
+        deltas: [{ path: "reserved", before: 39, after: "banana", kind: "increment" }],
+        resultingFingerprint: computeFingerprint({ reserved: 42 }),
+        assumptions: [],
+        producedBy: "shadow-execution",
+      }),
+    } as unknown as SimulationAdapter<StockState>;
+
+    const result = simulate(makeReserveAction(3), makeStockWorld(39), nonsenseIncrementAdapter);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.failure.kind).toBe("malformed-effect");
+      if (result.failure.kind === "malformed-effect") {
+        expect(result.failure.problems.some((p) => p.includes('kind "increment"') && p.includes("not a finite number"))).toBe(true);
+      }
+    }
+  });
+
+  it("GATE 3 sanity: an 'increment' that is a legitimate DECREASE (after < before) is NOT rejected — kind's numeric coherence check must not over-constrain the sign", () => {
+    const decrementAdapter: SimulationAdapter<StockState> = {
+      project: () => ({
+        deltas: [{ path: "reserved", before: 39, after: 10, kind: "increment" }],
+        resultingFingerprint: computeFingerprint({ reserved: 10 }),
+        assumptions: [],
+        producedBy: "shadow-execution",
+      }),
+    };
+
+    const result = simulate(makeReserveAction(-29), makeStockWorld(39), decrementAdapter);
+
+    expect(result.ok).toBe(true);
+  });
+
   it("GATE 4 (inconsistent-effect): an adapter whose claimed resultingFingerprint doesn't match its own claimed deltas is rejected", () => {
     const lyingAdapter: SimulationAdapter<StockState> = {
       project: () => ({
