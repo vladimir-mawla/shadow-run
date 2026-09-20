@@ -8,10 +8,15 @@ import { MILESTONES, currentMilestone } from "./milestones";
  * Progress is read from app/milestones.ts, never hardcoded into this
  * prose — see that file's comment for why (a hardcoded milestone number
  * on a previous project's public page went stale for two milestones).
- * As of M2, zero milestones are marked "done": M1's code is built but
- * still awaiting independent verification, and nothing here should imply
- * otherwise, or imply a working simulator/reconciliation/rollback engine
- * exists — none of lib/simulate, lib/reconcile, or lib/rollback exist yet.
+ * `doneCount` below is COMPUTED from that module at render time, not a
+ * number written here — deliberately, so this comment never has to be
+ * edited (and never again risks going stale, the way "as of M2, zero
+ * milestones are marked done" did the moment M1 was marked done) just
+ * because a milestone's status changed. What still needs saying in prose,
+ * because the count alone doesn't say it: nothing on this page should ever
+ * imply a working simulator/reconciliation/rollback engine exists — none
+ * of lib/simulate, lib/reconcile, or lib/rollback exist yet, regardless of
+ * how many milestones are marked done.
  */
 export default function Home() {
   const current = currentMilestone();
