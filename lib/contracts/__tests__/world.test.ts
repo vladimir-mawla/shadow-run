@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertPlainData, isPlainData, makeWorld, NonPlainDataError, type Json, type World } from "../world.js";
+import { assertPlainData, deepFreezeClone, isPlainData, makeWorld, NonPlainDataError, type Json, type World } from "../world.js";
 import { computeFingerprint } from "../fingerprint.js";
 
 /**
@@ -193,5 +193,97 @@ describe("makeWorld — the one blessed World constructor", () => {
     expect(() =>
       makeWorld({ id: "x", domain: "d", version: 1, at: "2026-09-20T00:00:00.000Z", data: asJson }),
     ).toThrow(NonPlainDataError);
+  });
+
+  /**
+   * L4 verification finding (round 2): makeWorld neither cloned nor froze
+   * `input.data`, so a caller who kept a reference could mutate the
+   * returned World's data after construction, silently staling the
+   * fingerprint. This is the exact reproduction from that report.
+   */
+  it("a caller mutating their own object after construction does NOT affect the returned World — the snapshot is independent of the input", () => {
+    const mutableData = { a: 1 };
+    const world = makeWorld({ id: "x", domain: "d", version: 1, at: "t", data: mutableData });
+    const fingerprintAtConstruction = world.fingerprint;
+
+    mutableData.a = 999; // mutate the caller's own, still-held reference.
+
+    expect(world.data.a).toBe(1); // unaffected — world.data is a separate object.
+    expect(world.data).not.toBe(mutableData); // cloned, not the same reference.
+    expect(world.fingerprint).toBe(fingerprintAtConstruction); // never had a chance to go stale.
+    expect(mutableData.a).toBe(999); // the caller's own copy is untouched by makeWorld — still mutable.
+  });
+
+  it("RUNTIME: mutating World.data directly throws, rather than silently no-op-ing — real failure, not Object.isFrozen alone", () => {
+    // Deliberately NOT a `@ts-expect-error` case: `World.data`'s nested field
+    // is not `readonly` at the type level (only the top-level `data` field
+    // is) — see makeWorld's own doc comment, point 3, on why `readonly` and
+    // `Object.freeze` are different guarantees. This assignment compiles
+    // clean and is expected to throw only at runtime, in this all-ESM,
+    // always-strict-mode codebase.
+    const world = makeWorld({ id: "x", domain: "d", version: 1, at: "t", data: { a: 1 } });
+    expect(() => {
+      world.data.a = 2;
+    }).toThrow(TypeError);
+    expect(world.data.a).toBe(1);
+  });
+
+  it("RUNTIME: freezing is deep — a nested object/array inside World.data also throws on mutation, not just the root", () => {
+    const world = makeWorld({
+      id: "x",
+      domain: "d",
+      version: 1,
+      at: "t",
+      data: { nested: { count: 1 }, list: [1, 2, 3] },
+    });
+    expect(() => {
+      (world.data.nested as { count: number }).count = 2;
+    }).toThrow(TypeError);
+    expect(() => {
+      (world.data.list as number[]).push(4);
+    }).toThrow(TypeError);
+    expect(world.data.nested.count).toBe(1);
+    expect(world.data.list).toEqual([1, 2, 3]);
+  });
+
+  it("a shared (DAG, non-cyclic) reference inside data is cloned once and frozen once — both paths point at the same frozen clone", () => {
+    const shared = { label: "shared" };
+    const mutableData = { a: shared, b: shared };
+    const world = makeWorld({ id: "x", domain: "d", version: 1, at: "t", data: mutableData });
+
+    expect(world.data.a).toBe(world.data.b); // same clone reused, not two independent copies.
+    expect(Object.isFrozen(world.data.a)).toBe(true);
+  });
+});
+
+describe("deepFreezeClone — the reusable deep-clone-and-freeze helper behind makeWorld", () => {
+  it("clones rather than freezing the input in place — the input remains mutable after the call", () => {
+    const input = { a: 1 };
+    const clone = deepFreezeClone(input);
+    expect(clone).not.toBe(input);
+    expect(Object.isFrozen(input)).toBe(false);
+    input.a = 2; // must not throw: the original is untouched by this function.
+    expect(clone.a).toBe(1); // the clone is unaffected by the original's later mutation.
+  });
+
+  it("freezes the clone at every level, including nested arrays", () => {
+    const clone = deepFreezeClone({ a: [{ b: 1 }] } as Json);
+    expect(Object.isFrozen(clone)).toBe(true);
+    expect(Object.isFrozen((clone as { a: unknown }).a)).toBe(true);
+    expect(Object.isFrozen(((clone as { a: unknown[] }).a)[0])).toBe(true);
+  });
+
+  it("does not infinitely recurse or duplicate work on a shared (DAG) reference reachable from two paths", () => {
+    const shared = { x: 1 };
+    const input = { left: shared, right: shared } as unknown as Json;
+    const clone = deepFreezeClone(input) as unknown as { left: object; right: object };
+    expect(clone.left).toBe(clone.right); // cloned once, reused at both paths.
+  });
+
+  it("passes primitives through untouched (they are already immutable, nothing to clone or freeze)", () => {
+    expect(deepFreezeClone(42 as Json)).toBe(42);
+    expect(deepFreezeClone("x" as Json)).toBe("x");
+    expect(deepFreezeClone(null as Json)).toBe(null);
+    expect(deepFreezeClone(true as Json)).toBe(true);
   });
 });

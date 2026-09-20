@@ -226,6 +226,16 @@ happened in the real world. Both variants of `Rollback` are therefore proven, no
   guarantee. This is deliberately not M1's decision to make — `fingerprint.ts` stays exactly as it is for this
   milestone — but M5 should inherit this question from this ADR, not rediscover it independently the way an
   L4 verifier would otherwise have to point it out twice.
+- Forward note for M3, recorded for the same reason: `makeWorld` (world.ts) already contains a reusable
+  `deepFreezeClone` helper — deep-clones a `Json` value and freezes every object/array in the clone,
+  DAG-safe (a value shared via two paths is cloned and frozen once, not twice), used because `Object.freeze`
+  is shallow and this project's own "same input, same fingerprint, always" premise depends on `World.data`
+  actually being immutable after construction, not just typed `readonly`. Plan §A.1 already documents that
+  `simulate()` needs to deep-freeze its input `World` and assert that a mutation attempt throws rather than
+  silently succeeding (M3's own success criteria). M3 should import and call `deepFreezeClone` from
+  `lib/contracts` for that, not write a second deep-freeze walk — the DAG-safety and freeze-after-validation
+  ordering it got right here are exactly the details a second, independent implementation would be likely to
+  get wrong the first time. This is a note for M3 to act on then, not a reason to touch `lib/simulate/**` now.
 
 ## Alternatives rejected (summary, cross-referenced above)
 

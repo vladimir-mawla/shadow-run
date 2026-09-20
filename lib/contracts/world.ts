@@ -194,30 +194,100 @@ export function assertPlainData(value: unknown, context: string): void {
 }
 
 /**
+ * Deep-clones `value`, freezing every object and array in the resulting
+ * tree (`Object.freeze` is shallow — freezing only the root would leave
+ * every nested object/array mutable). Reusable independent of `makeWorld`:
+ * M3's `simulate()` boundary (plan §A.1) is documented to need the same
+ * "deep-freeze the input so a mutation attempt throws rather than silently
+ * succeeding" guarantee — see ADR 0001 for the note that M3 should call
+ * this rather than write a second deep-freeze walk.
+ *
+ * CLONES rather than freezing `value` in place. This is a deliberate
+ * choice, not an oversight: freezing the caller's own object would mean
+ * `makeWorld({ ..., data: someObject })` silently makes `someObject`
+ * permanently immutable everywhere else the caller holds a reference to
+ * it — including the extremely common pattern this project's own domain
+ * is built around, evolving one working object across a sequence of
+ * snapshots (`const before = makeWorld({ ..., data: state }); state.qty--;
+ * const after = makeWorld({ ..., data: state })`). Freezing in place would
+ * make the second call's mutation throw before it ever happens. Cloning
+ * costs one full traversal-and-copy of `data` per call and means
+ * `world.data !== input.data` even though they are deep-equal at the
+ * moment of construction — accepted as the right trade for keeping the
+ * caller's own copy of their data usable after the call.
+ *
+ * DAG-safe, not just cycle-safe: `cache` maps an original reference to its
+ * already-built replacement, so a value reachable from two different
+ * paths in the same input (legal — `isPlainData` rejects true cycles, but
+ * not a shared, acyclic reference) is cloned and frozen exactly once, and
+ * both paths in the output point at the same frozen clone rather than two
+ * independent copies. The cache is populated before recursing into a
+ * value's own children specifically so a genuine cycle (one that somehow
+ * reached this function despite `assertPlainData` already having rejected
+ * it) would return the in-progress clone instead of recursing forever —
+ * defense in depth, not the primary cycle guard.
+ */
+export function deepFreezeClone<T extends Json>(value: T, cache: Map<object, unknown> = new Map()): T {
+  if (value === null || typeof value !== "object") return value; // primitives are already immutable.
+
+  const cached = cache.get(value);
+  if (cached !== undefined) return cached as T;
+
+  if (Array.isArray(value)) {
+    const clone: unknown[] = [];
+    cache.set(value, clone);
+    for (const entry of value) clone.push(deepFreezeClone(entry as Json, cache));
+    return Object.freeze(clone) as T;
+  }
+
+  const clone: Record<string, unknown> = {};
+  cache.set(value, clone);
+  for (const [key, entry] of Object.entries(value)) {
+    clone[key] = deepFreezeClone(entry as Json, cache);
+  }
+  return Object.freeze(clone) as T;
+}
+
+/**
  * The one blessed `World` constructor referenced throughout this file's
- * header and `assertPlainData`'s own doc comment. Two things make a
+ * header and `assertPlainData`'s own doc comment. Three things make a
  * `World` built here strictly safer than a hand-assembled object literal
  * satisfying the `World<TState>` interface:
  *
  *   1. It calls `assertPlainData` on `data` before anything else, so the
  *      runtime gate the file header argues for is actually load-bearing
  *      for values built through this function, not merely exported and
- *      exercised only in `__tests__/`.
+ *      exercised only in `__tests__/`. Validation happens BEFORE cloning
+ *      or freezing (point 3) — freezing something this function is about
+ *      to reject would be pointless work at best.
  *   2. It computes `fingerprint` itself, via `computeFingerprint`
  *      (fingerprint.ts) — there is no `fingerprint` parameter to pass in
  *      the first place (see `__tests__/world.test.ts`'s
  *      `@ts-expect-error` proof). A caller supplying a stale or wrong
- *      fingerprint is a defect class this constructor makes structurally
- *      impossible, rather than a mistake `assertPlainData` or anything
- *      else would have to catch after the fact.
+ *      fingerprint FOR THE INPUT is a defect class this constructor makes
+ *      structurally impossible. That is a distinct guarantee from point 3
+ *      below — having nowhere to smuggle in a bad fingerprint doesn't by
+ *      itself stop the returned `data` from drifting out from under a
+ *      correct one after construction; that's what point 3 closes.
+ *   3. It deep-clones and deep-freezes `data` (`deepFreezeClone` above)
+ *      before returning it, so the returned `World.data` is independent
+ *      of whatever the caller keeps mutating and cannot itself be mutated
+ *      afterward — a `World` is a snapshot, and a snapshot that changes
+ *      under you is not one. This is a RUNTIME guarantee, distinct from
+ *      `World.data`'s compile-time `readonly` (interface fields):
+ *      `readonly` only stops `world.data = ...` from typechecking, and
+ *      says nothing about `world.data.someNestedField = ...`, and nothing
+ *      at all once a caller reaches for `as any`. `Object.freeze` is what
+ *      actually makes a mutation attempt on the returned value throw (in
+ *      this codebase's all-ESM, always-strict-mode files) instead of
+ *      silently no-op-ing.
  *
  * A `World` value can still be assembled by hand outside this function —
  * TypeScript's structural typing cannot forbid that, the same gap the
- * file header describes for `data` itself — but every call site that
- * goes through `makeWorld` gets both guarantees for free. `__tests__/`
- * builds `World` literals directly on purpose, to exercise the type-level
- * and runtime guards in isolation; that is not a call site this function
- * needs to replace.
+ * file header describes for `data` itself, and a hand-built `World` gets
+ * none of the three guarantees above. `__tests__/` builds `World` literals
+ * directly on purpose, to exercise the type-level and runtime guards in
+ * isolation; that is not a call site this function needs to replace.
  */
 export function makeWorld<TState extends Json>(input: {
   readonly id: string;
@@ -227,12 +297,13 @@ export function makeWorld<TState extends Json>(input: {
   readonly data: TState;
 }): World<TState> {
   assertPlainData(input.data, `makeWorld(id="${input.id}")`);
+  const data = deepFreezeClone(input.data);
   return {
     id: input.id,
     domain: input.domain,
     version: input.version,
     at: input.at,
-    data: input.data,
-    fingerprint: computeFingerprint(input.data),
+    data,
+    fingerprint: computeFingerprint(data),
   };
 }
