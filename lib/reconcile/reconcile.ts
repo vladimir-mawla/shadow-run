@@ -62,19 +62,26 @@ function indexByPath(deltas: ReadonlyArray<Delta>, side: "predicted" | "observed
  * "increment", before: 5, after: 10 }` at the same path: the FIELD ends
  * up at the same value either way, so a check that only compared
  * `before`/`after` would call this `confirmed`. It is treated as
- * `drifted` here instead, for a reason that is load-bearing, not
- * stylistic: M5's `invertDelta` (`lib/rollback/**`, sim-plan.md §A.4)
- * dispatches on `Delta.kind` to decide HOW to invert a delta --
- * `set`/`increment` invert by swapping `before`/`after`, but `remove`
- * inverts to a `set` and `append` inverts to a `remove` (asymmetric on
- * purpose). If a rollback is ever built from the OBSERVED delta (the
- * real effect that actually happened) while the projection's `kind` was
- * silently treated as "close enough" here, that is invisible right up
- * until an `unavailable`-shaped effect (say, an `append`) gets treated
- * as a `set`-shaped one and inverted the wrong way. Reconciliation is
- * this project's only mechanical checkpoint before that could happen, so
- * it is deliberately strict on `kind` even though the two example deltas
- * above are, in a narrower sense, "about the same change."
+ * `drifted` here instead -- NOT because today's specified pipeline
+ * already has a live defect this closes. It does not: M5's `invertDelta`
+ * (sim-plan.md §A.4) is specified to build `Rollback.runnable.steps` from
+ * `observedEffect.deltas` unconditionally, never from a `Reconciliation`
+ * value, so a `kind` mismatch waved through here would not, today, feed
+ * a wrong `kind` into an inversion. This is DEFENSE-IN-DEPTH against a
+ * plausible FUTURE misuse, with a concrete route a reader can check
+ * rather than a hypothetical one: this file's `confirmed` branch (see
+ * the closing comment below) returns `matched: predicted`, not
+ * `observed` -- so a future consumer that reasonably, but wrongly,
+ * treated `Reconciliation.confirmed.matched`'s `kind` as ground truth
+ * about what actually happened, instead of going back to the raw
+ * observed deltas the way M5 is specified to, would get the WRONG
+ * mechanism if a `kind` mismatch had been allowed to pass as `confirmed`
+ * here: `set`/`increment` invert by swapping `before`/`after`, but
+ * `remove` inverts to a `set` and `append` inverts to a `remove`
+ * (asymmetric on purpose), so treating an `append` as `set`-shaped and
+ * inverting it the wrong way is exactly the failure this strictness
+ * forecloses for that future reader -- even though no consumer specified
+ * today actually takes that path.
  *
  * REJECTED ALTERNATIVE: compare only `after` (or only the resulting
  * `World.fingerprint`, which M4 does not even have access to here --
