@@ -1,0 +1,194 @@
+import type { AssumptionKind, Delta, ProjectedEffect } from "../contracts/index.js";
+
+/**
+ * Runtime structural validation of whatever value an adapter's `project()`
+ * actually returned, BEFORE `simulate()` treats it as a trustworthy
+ * `ProjectedEffect`. This is the direct answer to the build brief's own
+ * question: "what happens when an adapter ... returns a malformed
+ * `ProjectedEffect`?" — see `.genesis/decisions/0002-simulate.md` for the
+ * full argument for why this file exists at all rather than trusting
+ * TypeScript's compile-time shape.
+ *
+ * WHY A RUNTIME CHECK, WHEN `SimulationAdapter.project`'S RETURN TYPE IS
+ * ALREADY `ProjectedEffect`: TypeScript's type system is a compile-time
+ * discipline on code THIS REPOSITORY controls; it says nothing about a
+ * value that arrives at runtime having been produced by a `project()`
+ * implementation this milestone did not write and cannot fully see ahead
+ * of time (a future domain adapter, M6's job; a test's deliberately-bad
+ * fixture, `consistency.test.ts`; a value smuggled past the type checker
+ * with `as ProjectedEffect`, the exact same class of gap `world.ts`'s
+ * `isPlainData` exists to close for `World.data`, one layer over). A
+ * `simulate()` that skipped this and trusted the declared return type
+ * would be "a simulator that trusts its adapter" — precisely the
+ * "story generator" failure mode the build brief names by name.
+ *
+ * WHAT IS AND ISN'T CHECKED HERE, STATED PLAINLY: this file checks SHAPE
+ * (right fields, right primitive types, `assumptions`/`producedBy`/`kind`
+ * drawn from their closed vocabularies) — it does NOT check whether the
+ * `deltas` are actually consistent with the `World` they were computed
+ * against, or whether `resultingFingerprint` is the honest hash of
+ * applying them. That is `consistency.ts`'s job, deliberately kept
+ * separate: a value can be well-SHAPED and still be a LIE about what it
+ * predicts, and conflating "is this the right shape" with "is this true"
+ * into one function would make it harder to name, in a failure report,
+ * which of the two problems actually occurred.
+ *
+ * ONE EXCEPTION TO "SHAPE ONLY," ADDED AFTER INDEPENDENT VERIFICATION
+ * FOUND IT MISSING: `Delta.kind`'s own DECLARED MEANING was never checked
+ * against its `before`/`after` values at all — `{ kind: "increment",
+ * before: 39, after: "banana" }` passed clean, even though `delta.ts`'s
+ * own header defines `increment` as "a signed numeric change to a
+ * counter." `validateDeltaShape` (below) now enforces exactly that one
+ * coherence rule — `before`/`after` must both be finite numbers when
+ * `kind === "increment"` — and no other. It deliberately does NOT check
+ * the sign of the change (`after < before` under `"increment"` is a
+ * legitimate decrement, per `delta.ts`'s own "signed" wording) and it
+ * does NOT extend any numeric constraint to `set`/`remove`/`append`,
+ * whose `before`/`after` `delta.ts` never claims are numeric. See that
+ * function's own comment for the full reasoning.
+ */
+
+/** One structural problem found in a value that was supposed to be a `ProjectedEffect`. Free text is fine here — this describes why THIS ENGINE rejected a malformed value, not a claim a projection makes about the world; see `result.ts`'s header for why that distinction matters and does not reopen the "no free text" discipline `ProjectedEffect.assumptions` itself is held to. */
+export type EffectShapeProblem = string;
+
+const VALID_ASSUMPTION_KINDS: ReadonlySet<AssumptionKind> = new Set([
+  "no-concurrent-writer",
+  "world-version-unchanged",
+  "clock-monotonic",
+]);
+
+const VALID_DELTA_KINDS: ReadonlySet<Delta["kind"]> = new Set(["set", "increment", "remove", "append"]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Validates one `Delta`-shaped value found inside `deltas[index]`,
+ * appending every problem found (there can be more than one per entry —
+ * e.g. a bad `path` AND a bad `kind` on the same object) to `problems`
+ * rather than stopping at the first, so a single malformed effect reports
+ * everything wrong with it in one pass, not one problem per fix-and-rerun
+ * cycle.
+ */
+function validateDeltaShape(value: unknown, index: number, problems: EffectShapeProblem[]): void {
+  if (!isRecord(value)) {
+    problems.push(`deltas[${index}] is not an object`);
+    return;
+  }
+  if (typeof value["path"] !== "string" || value["path"].length === 0) {
+    problems.push(`deltas[${index}].path must be a non-empty string`);
+  }
+  if (typeof value["kind"] !== "string" || !VALID_DELTA_KINDS.has(value["kind"] as Delta["kind"])) {
+    problems.push(`deltas[${index}].kind must be one of "set" | "increment" | "remove" | "append", got ${JSON.stringify(value["kind"])}`);
+  }
+  // `before`/`after` are `unknown` by design (delta.ts) — nothing to validate about their shape beyond "the key exists," which `in` (not a presence-of-undefined check) verifies honestly even when the real value is `undefined`.
+  if (!("before" in value)) problems.push(`deltas[${index}] is missing "before"`);
+  if (!("after" in value)) problems.push(`deltas[${index}] is missing "after"`);
+
+  // ONE deliberate exception to "before/after are unknown, nothing to
+  // validate about their shape": `kind: "increment"`. `delta.ts`'s own
+  // header defines increment, by name, as "a signed numeric change to a
+  // counter" — that is `Delta`'s own declared meaning for this one kind,
+  // not an invented constraint, and it was being silently ignored:
+  // independent verification confirmed `{ kind: "increment", before: 39,
+  // after: "banana" }` passed this file's shape check with zero problems
+  // (a non-numeric "increment" is nonsense on its face and cheap to
+  // reject here, rather than only surfacing three steps later as a
+  // confusing NaN inside `consistency.ts`'s fingerprint math or,
+  // depending on what `computeFingerprint(JSON.stringify(...))` does with
+  // a string where a number was expected, silently "succeeding" with the
+  // wrong claim). DELIBERATELY NOT checked: the SIGN or DIRECTION of the
+  // change — `after < before` under `kind: "increment"` is a legitimate
+  // decrement (`delta.ts`: "a signed numeric change"), and rejecting it
+  // would be inventing a constraint `Delta`'s own type never states,
+  // exactly the over-constraining the finding that prompted this check
+  // warned against. Every OTHER kind keeps its `before`/`after` fully
+  // open: `set` can legitimately replace a scalar with a wholesale
+  // different shape (object, string, ...), and `remove`/`append`'s
+  // values are whatever the domain's real data holds — `delta.ts` makes
+  // no numeric claim for any of the other three, so this file makes none
+  // either.
+  if (value["kind"] === "increment") {
+    if (typeof value["before"] !== "number" || !Number.isFinite(value["before"])) {
+      problems.push(`deltas[${index}] has kind "increment" but "before" is not a finite number, got ${JSON.stringify(value["before"])} — delta.ts defines increment as "a signed numeric change to a counter"`);
+    }
+    if (typeof value["after"] !== "number" || !Number.isFinite(value["after"])) {
+      problems.push(`deltas[${index}] has kind "increment" but "after" is not a finite number, got ${JSON.stringify(value["after"])} — delta.ts defines increment as "a signed numeric change to a counter"`);
+    }
+  }
+}
+
+/**
+ * The one entry point: validates `candidate` (whatever an adapter actually
+ * returned, typed `unknown` here on purpose — see file header) against
+ * `ProjectedEffect`'s full shape. Returns every problem found, or an empty
+ * array if `candidate` is well-formed — never throws, so `simulate.ts` can
+ * treat "malformed" as an ordinary, named `SimulationResult` failure
+ * rather than a second, differently-shaped exception path to catch.
+ */
+export function validateEffectShape(candidate: unknown): readonly EffectShapeProblem[] {
+  const problems: EffectShapeProblem[] = [];
+
+  if (!isRecord(candidate)) {
+    return ["projected effect is not an object"];
+  }
+
+  if (!Array.isArray(candidate["deltas"])) {
+    problems.push('"deltas" must be an array');
+  } else {
+    candidate["deltas"].forEach((entry, index) => validateDeltaShape(entry, index, problems));
+  }
+
+  if (typeof candidate["resultingFingerprint"] !== "string" || candidate["resultingFingerprint"].length === 0) {
+    problems.push('"resultingFingerprint" must be a non-empty string');
+  }
+
+  if (!Array.isArray(candidate["assumptions"])) {
+    problems.push('"assumptions" must be an array');
+  } else {
+    candidate["assumptions"].forEach((entry, index) => {
+      if (typeof entry !== "string" || !VALID_ASSUMPTION_KINDS.has(entry as AssumptionKind)) {
+        problems.push(`assumptions[${index}] is not a member of the closed AssumptionKind enum, got ${JSON.stringify(entry)}`);
+      }
+    });
+  }
+
+  if (candidate["producedBy"] !== "shadow-execution") {
+    problems.push(`"producedBy" must be exactly "shadow-execution", got ${JSON.stringify(candidate["producedBy"])}`);
+  }
+
+  return problems;
+}
+
+/**
+ * Narrows `candidate` to `ProjectedEffect` — a BARE CAST, not a check. It
+ * performs zero validation of its own; it is only safe to call the
+ * instant after `validateEffectShape(candidate)` has returned an empty
+ * `problems` array for that SAME `candidate`, which is the only reason
+ * `simulate.ts` is allowed to call it at all.
+ *
+ * NOT EXPORTED FROM `index.ts`, ON PURPOSE — this was a real defect,
+ * found by independent verification, not a precaution added in advance.
+ * This function was originally exported from the public barrel with a
+ * comment claiming it was "used exactly once, in simulate.ts" — true of
+ * every call site THIS FILE'S AUTHOR wrote, false of the type once it was
+ * public: any external importer could call
+ * `asProjectedEffect({ deltas: "not even an array" })` and get back a
+ * value the type system calls `ProjectedEffect`, with none of
+ * `validateEffectShape`'s or `checkConsistency`'s checks having run —
+ * skipping every one of `simulate()`'s four fail-closed gates
+ * (`result.ts`) from outside this module entirely, without ever calling
+ * `simulate()`. A doc comment describing a discipline is not the same
+ * thing as a type system enforcing it; only removing the export does
+ * that (see `index.ts`'s own header for the fix and the confirmed
+ * before/after). If a future milestone genuinely needs this exported,
+ * it must keep it exactly as unsafe as it is (this file does not attempt
+ * to make the cast itself safer — the shape check IS the safety, and it
+ * lives in `validateEffectShape`, not here) and repeat this same warning
+ * at the new call site, the same discipline `path.ts` already holds its
+ * own internal-only primitives to.
+ */
+export function asProjectedEffect(candidate: unknown): ProjectedEffect {
+  return candidate as ProjectedEffect;
+}

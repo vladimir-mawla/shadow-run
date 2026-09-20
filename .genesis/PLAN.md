@@ -228,3 +228,54 @@ not cheating: a discarded real transaction *is* a valid, maximally accurate shad
   frozen boundary untouched. **Deployment itself has not happened** — the Vercel import is a human step this
   agent cannot perform; the repo is import-ready and the PR names the exact steps. Not marked done in
   `DONE.html`, and cannot be until a real `$DEPLOY_URL` answers the demo command.
+- M3 (L1 BUILD): `lib/simulate/**` implemented — `Action` (action.ts, M3-owned; `lib/contracts` never
+  defined it), `SimulationAdapter` (adapter.ts, synchronous `project(action, world): ProjectedEffect`, never
+  `Promise`-returning — a second, independent structural barrier against an LLM/network call, on top of the
+  grep-based architectural test), `getAtPath`/`setAtPath`/`deleteAtPath` (path.ts, internal-only, not
+  exported from the barrel), `validateEffectShape`/`asProjectedEffect` (effect-validation.ts, the runtime
+  shape gate a compile-time return type cannot provide for a value produced by code this milestone didn't
+  write), `checkConsistency` (consistency.ts — applies an adapter's own claimed `deltas` to the real input
+  `World.data` and checks two things: each delta's claimed `before` against what is actually there, and the
+  final derived fingerprint against the claimed `resultingFingerprint`; the strongest structural answer this
+  milestone has to "you're just asking a model to guess"), `SimulationResult`/`SimulationFailure`/
+  `assertNeverSimulationFailure` (result.ts, a discriminated union with four named failure kinds —
+  `invalid-world`/`adapter-threw`/`malformed-effect`/`inconsistent-effect` — no variant carries a
+  usable-looking effect alongside its failure), and `simulate()` itself (simulate.ts, running all four gates
+  in that order). Reuses `deepFreezeClone` from `lib/contracts` for both `world.data` and `action.params`
+  rather than writing a second deep-freeze walk, per ADR 0001's forward note — builds a fresh `safeWorld`/
+  `safeAction` regardless of whether the caller's own `World` was already frozen, so the guarantee holds
+  structurally rather than only for callers who remembered to use `makeWorld`. Full design record, including
+  the rejected alternatives for the adapter interface, the fail-closed policy, and the honest scoping of
+  what the self-consistency check does and does not prove: `.genesis/decisions/0002-simulate.md`.
+
+  Purity (success criterion (a)) is stated honestly, not overclaimed: `simulate()`'s own body is proven
+  deterministic; an adapter's own internal purity is DETECTED, not structurally prevented — nothing in a
+  function's type signature stops its body from calling `Date.now()`/`Math.random()`, and no test can prove
+  a universal negative over arbitrary future domain code. `__tests__/purity.test.ts` proves the positive
+  case across three repeat calls AND demonstrates the gap honestly with a deliberately-impure fixture
+  adapter whose repeat calls do not agree, rather than asserting a guarantee that isn't fully there.
+
+  Non-mutation (success criterion (b)) is proven three ways in `__tests__/immutability.test.ts`: the `World`
+  an adapter receives is frozen and a direct mutation throws; this holds even for a hand-built `World` that
+  skipped `makeWorld` entirely (proving `simulate()` defends this itself, not inherited frozenness); an
+  adapter that actually attempts a mutation is caught and reported as a named `adapter-threw` failure, never
+  silently swallowed as success.
+
+  The architectural test (success criterion (c), `__tests__/architecture.test.ts`) is an ALLOWLIST, not a
+  denylist: every import in non-test source under `lib/simulate/**` must be a relative specifier, which
+  forecloses every LLM SDK, network library, and Node built-in in one rule with nothing to enumerate ahead of
+  time — chosen specifically because an enumerated denylist is the same "cleverly parse a flexible surface"
+  shape that let this repo's own `app/milestones.test.ts` drift guard get bypassed five separate times (see
+  its commit history). A second, independent check bans the bare global `fetch(...)` call, which needs no
+  import at all. Built with the same character-by-character tokenizer decision-engine's own
+  `framework-free.test.ts` uses (comments/strings treated as opaque spans) specifically so it survives
+  ordinary reformatting — that project's own line-anchored predecessor was defeated by Prettier-wrapped
+  multi-line imports; this file's own "teeth" tests prove the same evasion shapes are caught here, and its
+  "false-positive discipline" tests prove it does not flag this very file's own sanity-test strings, the
+  exact hazard `framework-free.test.ts` names by name.
+
+  `npm test -- simulate`: 5 test files, 55 tests, all passing. Repo-wide `npm test`: 13 test files, 138
+  tests, all passing (up from main's 8 files / 83 tests). `npm run typecheck`: clean, both tsconfigs.
+  `npm run build` succeeds. `git diff main -- lib/contracts`: empty — frozen boundary untouched, confirmed
+  at every commit on this branch, not only at the end. Awaiting independent (L4) verification — not marked
+  done in `DONE.html`.
