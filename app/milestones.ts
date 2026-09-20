@@ -40,7 +40,7 @@ export const MILESTONES: readonly Milestone[] = [
   { id: 1, title: "Contracts: World, ProjectedEffect, Reconciliation, Rollback", status: "done" },
   { id: 2, title: "Deploy a live skeleton to Vercel", status: "done" },
   { id: 3, title: "The shadow-execution engine (simulate())", status: "planned" },
-  { id: 4, title: "Reconciliation and the trust feedback loop", status: "planned" },
+  { id: 4, title: "Reconciliation and the trust feedback loop", status: "done" },
   { id: 5, title: "Rollback engine: compensations that actually run", status: "planned" },
   { id: 6, title: "Domains: four adapters wired end to end", status: "planned" },
   { id: 7, title: "The failure suite", status: "planned" },

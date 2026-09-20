@@ -223,11 +223,19 @@ exists specifically so the claim is checked, not merely written down (per this a
   a judge (plan §B) — a domain adapter (M6) or the demo itself (M8) that renders a synthesized `actual` as
   if it were observed (e.g. "observed: 39") would be showing a viewer something the system only inferred,
   not something it saw. Whichever milestone builds that rendering must distinguish the two cases before
-  display — e.g. by checking `actual.before === actual.after` on a `drifted` result as the signal that this
-  `actual` was synthesized (a genuinely observed delta could coincidentally also have `before === after`
-  only if the "observed" step recorded a no-op entry, which `ObservedEffect`'s own definition, plan §A.3
-  step 3, rules out — an observed diff only ever contains an entry for a path that changed) — and present
-  it as "no change was observed at this path," never as "observed: X." This is deliberately NOT fixed by
+  display — e.g. by checking `actual.before === actual.after` on a `drifted` result. Be precise about what
+  that check measures: it detects **no net change at this path**, NOT synthesis. A genuinely observed no-op
+  entry would satisfy the identical boolean, and nothing in `reconcile()` can tell the two apart. What rules
+  the observed no-op out is an EXTERNAL contract — `ObservedEffect`'s own definition (plan §A.3 step 3) says
+  a real diff only ever contains an entry for a path that actually changed — and that is a property of
+  M3/M6 code which does not exist yet and which this milestone neither enforces nor can verify (unlike the
+  within-side duplicate-path invariant, which `reconcile()` does check and fails closed on).
+
+  The presentation guidance holds regardless, which is why the imprecision is survivable: if
+  `before === after` then nothing changed at that path, whether the entry arrived by synthesis or by a
+  contract-violating recorded no-op. So render it as "no change was observed at this path," never as
+  "observed: X." Use the check to choose correct UI text — do not use it to assert that a value was
+  synthesized. This is deliberately NOT fixed by
   changing the `Reconciliation` type (no runtime marker is added here) or by adding one now: Decision 4
   already argues why widening the frozen type for this is out of scope for M4, and the risk this note
   names is entirely about downstream PRESENTATION, not about `reconcile()`'s own correctness.
