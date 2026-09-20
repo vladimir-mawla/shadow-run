@@ -28,13 +28,66 @@ import { MILESTONES } from "./milestones";
  */
 const DONE_HTML = new URL("../.genesis/DONE.html", import.meta.url);
 
+/**
+ * Every (milestone id, pill state) pair in a DONE.html-shaped status table.
+ *
+ * Takes the HTML as a parameter (rather than always reading the file) so a
+ * decoy row can be fed through this exact code path in a test, not just
+ * asserted about in prose.
+ *
+ * The original version of this parser matched
+ * `<span class="pill[^"]*">` anywhere between a row's opening `<td>` and its
+ * closing `</tr>`, non-greedily — i.e. "the first pill-ish span in the row."
+ * That is wrong on two independent counts, either of which is enough to
+ * misread a row:
+ *   1. `pill[^"]*` matches by PREFIX, so a class like `pill-shaped-decoy`
+ *      (which has nothing to do with the status column) satisfies it.
+ *   2. Matching "anywhere in the row" means a decoy span earlier in a
+ *      free-text title cell — e.g. M2's own row now has `<span
+ *      class="note">` markup in its title — gets matched before the real
+ *      status pill even though it isn't in the Status column at all.
+ * The table's own header row (`#, Milestone, Phase, Demo command, Loops,
+ * Status`) makes the fix obvious: the status pill is always the LAST `<td>`
+ * in the row, structurally, regardless of what free-form markup earlier
+ * cells contain. So this version (a) splits the row into its actual `<td>`
+ * cells and only looks at the last one, and (b) matches the `pill` class as
+ * an exact token (`pill` or `pill <status>`), not a prefix, as defense in
+ * depth against a decoy class landing in that last cell too. A row whose
+ * last cell has no pill at all throws instead of being silently dropped —
+ * a guard that can fail open by shrinking its own result set is worse than
+ * no guard.
+ */
+function pillsInHtml(html: string): { id: string; state: string }[] {
+  // Only rows whose FIRST cell is a milestone id are data rows — this is
+  // what lets the header row (`<tr><th>#</th>...`) be skipped on purpose,
+  // rather than by accident. Any row that passes this gate is a milestone
+  // row that must have a real status pill, so nothing past this point is
+  // allowed to fail silently.
+  const rows = [...html.matchAll(/<tr><td>M\d+<\/td>[\s\S]*?<\/tr>/g)].map((m) => m[0]);
+  return rows.map((row) => {
+    const idMatch = row.match(/<td>(M\d+)<\/td>/);
+    if (!idMatch) {
+      throw new Error(`DONE.html row has no milestone id in its first cell: ${row}`);
+    }
+    const id = idMatch[1]!;
+    const cells = [...row.matchAll(/<td>[\s\S]*?<\/td>/g)].map((m) => m[0]);
+    const lastCell = cells[cells.length - 1];
+    if (lastCell === undefined) {
+      throw new Error(`DONE.html row for ${id} has no <td> cells at all: ${row}`);
+    }
+    // Exact class token match ("pill" or "pill <status>"), not a prefix —
+    // see the function comment for why a prefix match is exploitable.
+    const pillMatch = lastCell.match(/<span class="pill(?: [a-z]+)?">([a-z]+)<\/span>/);
+    if (!pillMatch) {
+      throw new Error(`DONE.html row for ${id} has no status pill in its last cell: ${lastCell}`);
+    }
+    return { id, state: pillMatch[1]! };
+  });
+}
+
 /** Every (milestone id, pill state) pair in DONE.html's status table. */
 function pillsInDoneHtml(): { id: string; state: string }[] {
-  const html = readFileSync(DONE_HTML, "utf8");
-  const rows = html.matchAll(
-    /<tr><td>(M\d+)<\/td>(?:(?!<\/tr>)[\s\S])*?<span class="pill[^"]*">([a-z]+)<\/span>/g,
-  );
-  return [...rows].map((r) => ({ id: r[1]!, state: r[2]! }));
+  return pillsInHtml(readFileSync(DONE_HTML, "utf8"));
 }
 
 /** DONE.html ids are "M1"-style; the module's are numeric. Normalise here so
@@ -56,5 +109,34 @@ describe("app/milestones.ts agrees with .genesis/DONE.html", () => {
   it("claims exactly the same milestones complete in both places", () => {
     const fromModule = MILESTONES.filter((m) => m.status === "done").map((m) => m.id);
     expect(fromModule).toEqual(completedInDoneHtml());
+  });
+});
+
+describe("pillsInHtml (the drift guard's own parser)", () => {
+  it("reads the row's real trailing status pill, not a decoy pill-ish span in the title cell", () => {
+    // Verified reproduction of the bug: a decoy span earlier in the row's
+    // free-text title cell (class starts with "pill" but isn't the status
+    // pill) must not be what gets read. The rendered row's real status,
+    // in its last cell, is "todo" — this must return "todo", not "done".
+    const decoyRow =
+      '<tr><td>M2</td><td>Deploy <span class="pill-shaped-decoy">done</span> a live skeleton ' +
+      '<span class="note">note</span></td><td>DEPLOY</td><td><code>curl -sf ' +
+      "$DEPLOY_URL/api/health</code></td><td>L1, L4</td><td>" +
+      '<span class="pill todo">todo</span></td></tr>';
+
+    expect(pillsInHtml(decoyRow)).toEqual([{ id: "M2", state: "todo" }]);
+  });
+
+  it("fails loudly, not silently, when a row's last cell has no status pill at all", () => {
+    // A row that's missing its status pill entirely (malformed markup, a
+    // half-finished edit, whatever) must be caught loudly. Silently
+    // dropping it from the result set would make every drift assertion
+    // pass vacuously for that milestone instead of failing where the real
+    // problem is.
+    const noPillRow =
+      "<tr><td>M1</td><td>Contracts</td><td>BUILD</td>" +
+      "<td><code>npm test -- contracts</code></td><td>L1, L4</td><td>oops, no pill here</td></tr>";
+
+    expect(() => pillsInHtml(noPillRow)).toThrow(/no status pill in its last cell/);
   });
 });
