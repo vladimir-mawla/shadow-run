@@ -42,12 +42,24 @@ import type { Rollback } from "../../lib/contracts/rollback.js";
  * ARGUED ====================================================================
  * Every "immune" claim below is a real call against real code, not an
  * assertion of the design doc's prose. `reconcile()`, `SimulatorTrust`,
- * and `checkConsistency` are proven immune because each is shown, by
- * direct call, to compare structural values and never once read a
- * `fingerprint` field anywhere in its own logic (confirmed by reading
- * `reconcile.ts`/`trust.ts`/`consistency.ts` directly before writing
- * this file — none of the three imports `computeFingerprint` or reads
- * `.fingerprint` off anything). `runRollback`'s stronger proof
+ * and `checkConsistency` are proven immune by direct call — but by TWO
+ * DIFFERENT mechanisms, and an earlier version of this comment wrongly
+ * described them as one.
+ *
+ * `reconcile()` and `SimulatorTrust` never touch a hash at all: neither
+ * `reconcile.ts` nor `trust.ts` imports `computeFingerprint` or reads
+ * `.fingerprint` off anything, so a collision cannot reach them.
+ *
+ * `checkConsistency` is immune for the opposite reason — it uses
+ * fingerprints heavily and correctly. `consistency.ts:1` imports
+ * `computeFingerprint` and line 100 calls it to DERIVE a fingerprint from
+ * the real data, then compares that against the effect's claimed
+ * `resultingFingerprint`. It never trusts a claimed hash, which is why an
+ * adversary who picks an attractive colliding value is still rejected:
+ * Layer 1 re-verifies each delta's own `before` against reality
+ * independently of any hash. Saying it "never reads a fingerprint" would
+ * be the opposite of how it actually proves the more interesting half of
+ * 4b. `runRollback`'s stronger proof
  * (`assumeNoConcurrentWriter`) is proven to survive specifically BECAUSE
  * it is `dataMatchesExactly` (`deepEqual`), not `fingerprintMatches`, that
  * drives its `"dishonest"` branch — demonstrated by constructing a case

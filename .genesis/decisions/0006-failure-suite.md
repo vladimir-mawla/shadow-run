@@ -35,7 +35,14 @@
 ## What none of the three cases claim
 
 - Nothing here proves the collision is reachable at M6's real, multi-field `StockState` shape — only at the minimal `World<{ reserved: number }>` shape this codebase's own test fixtures already use.
-- Case 4's `checkConsistency`/`reconcile`/`SimulatorTrust` immunity claims are scoped to "never reads a fingerprint in its own logic" — confirmed by reading the real source of all three, not inferred from behavior alone.
+- Case 4's immunity claims cover two different mechanisms, not one, and an earlier version of this line
+  conflated them. `reconcile()` and `SimulatorTrust` are immune because they never touch a hash —
+  neither `reconcile.ts` nor `trust.ts` imports `computeFingerprint`. `checkConsistency` is immune for the
+  opposite reason: it imports `computeFingerprint` (`consistency.ts:1`) and calls it (line 100) to *derive*
+  a fingerprint from real data and compare it against the claimed one, never trusting a claimed hash. The
+  original "none of the three reads a fingerprint" phrasing was factually wrong about `checkConsistency`
+  and would have led a reader to the opposite of how that case actually works. Caught by independent
+  verification; the sub-tests themselves were correct throughout.
 - Case 3 does not speculate about a forward-execution (`applyReal()`) failure mode — `applyDeltas` is the same interpreter for both directions, but M6's forward-execution wiring is out of scope here entirely.
 - 4c's gate is a specification, not a shipped enforcement point — see above.
 
