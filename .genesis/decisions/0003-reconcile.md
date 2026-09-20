@@ -57,15 +57,21 @@ same, is that drift?"
 **Alternatives considered:**
 
 - **Compare only `before`/`after` (the resulting value), ignore `kind`.** This is the more "obvious"
-  choice at first glance — if the field ends up the same value either way, why call it drift? Rejected,
-  for a load-bearing reason, not a stylistic one: M5's `invertDelta` (`lib/rollback/**`, sim-plan.md §A.4)
-  dispatches on `Delta.kind` to decide HOW to invert a delta — `set`/`increment` invert by swapping
+  choice at first glance — if the field ends up the same value either way, why call it drift? Rejected —
+  not because today's specified pipeline already has a live defect this closes. It does not: M5's
+  `invertDelta` (`lib/rollback/**`, sim-plan.md §A.4) is specified to build `Rollback.runnable.steps` from
+  `observedEffect.deltas` unconditionally, never from a `Reconciliation` value, so a `kind` mismatch waved
+  through here would not, today, feed a wrong `kind` into an inversion. This is DEFENSE-IN-DEPTH against a
+  plausible FUTURE misuse, with a concrete route rather than a hypothetical one: `reconcile()`'s
+  `confirmed` branch returns `matched: predicted`, not `observed` (see `reconcile.ts`'s own comment on
+  that choice). A future consumer that reasonably, but wrongly, treated
+  `Reconciliation.confirmed.matched`'s `kind` as ground truth about what actually happened, instead of
+  going back to the raw observed deltas the way M5 is specified to, would get the WRONG mechanism if a
+  `kind` mismatch had been allowed to pass as `confirmed` — `set`/`increment` invert by swapping
   `before`/`after`, but `remove` inverts to a `set` and `append` inverts to a `remove` (asymmetric on
-  purpose). A `kind` mismatch that reconciliation waved through as "confirmed, because the value matched"
-  would still be recorded as if the projection had been fully right — and if a later stage ever builds a
-  rollback plan from that projection's `kind` rather than the observed one, it inverts the WRONG way while
-  every earlier check said everything was fine. Reconciliation is this project's only mechanical
-  checkpoint before that could happen.
+  purpose), so treating an `append` as `set`-shaped and inverting it the wrong way is exactly the failure
+  this strictness forecloses for that future reader, even though no consumer specified today actually
+  takes that path.
 - **Compare `World.fingerprint`/`resultingFingerprint` instead of individual Delta fields.**
   Not applicable at this layer: `reconcile()` operates on `Delta[]`, not `World` values — it has no access
   to a fingerprint here, and `resultingFingerprint` already exists on `ProjectedEffect` to answer "did the
@@ -205,6 +211,26 @@ exists specifically so the claim is checked, not merely written down (per this a
   that alternates `confirmed`/`drifted` never trips the trust gate under this reset-on-success counter, no
   matter how long it runs. This is the accepted trade named in ADR 0001's sibling document
   (`simulator-trust.ts`'s own header) and sim-plan.md §A.3; it is not revisited or narrowed here.
+- Forward note for M6 and M8, recorded now rather than rediscovered then (mirroring ADR 0001's own
+  forward notes to M3 and M5, which is exactly why THIS milestone did not have to rediscover the
+  fingerprint-collision question independently): `Reconciliation.drifted.actual` may be SYNTHESIZED
+  rather than genuinely observed — this is Decision 4's "vanished prediction" case, where `reconcile()`
+  constructs `{ path, before: predicted.before, after: predicted.before, kind: "set" }` because nothing
+  was actually observed to change at that path. Nothing in the returned value marks this: a synthesized
+  `actual` is structurally identical to a real one, and the frozen `Reconciliation` type's own doc comment
+  (`reconciliation.ts`) describes `drifted` as a field that "came back with a different value than
+  predicted," language that reads as an observation either way. M8's demo renders `actual` on screen for
+  a judge (plan §B) — a domain adapter (M6) or the demo itself (M8) that renders a synthesized `actual` as
+  if it were observed (e.g. "observed: 39") would be showing a viewer something the system only inferred,
+  not something it saw. Whichever milestone builds that rendering must distinguish the two cases before
+  display — e.g. by checking `actual.before === actual.after` on a `drifted` result as the signal that this
+  `actual` was synthesized (a genuinely observed delta could coincidentally also have `before === after`
+  only if the "observed" step recorded a no-op entry, which `ObservedEffect`'s own definition, plan §A.3
+  step 3, rules out — an observed diff only ever contains an entry for a path that changed) — and present
+  it as "no change was observed at this path," never as "observed: X." This is deliberately NOT fixed by
+  changing the `Reconciliation` type (no runtime marker is added here) or by adding one now: Decision 4
+  already argues why widening the frozen type for this is out of scope for M4, and the risk this note
+  names is entirely about downstream PRESENTATION, not about `reconcile()`'s own correctness.
 
 ## Alternatives rejected (summary, cross-referenced above)
 
@@ -212,8 +238,10 @@ exists specifically so the claim is checked, not merely written down (per this a
   ordinary key-order differences.
 - Silently keeping the first delta on a duplicate `path`, or merging two same-path deltas (Decision 2) —
   launders a data-integrity bug into a confidently-wrong `Reconciliation`.
-- Comparing only the resulting value, ignoring `Delta.kind` (Decision 3) — breaks M5's `invertDelta`
-  dispatch silently, one stage downstream.
+- Comparing only the resulting value, ignoring `Delta.kind` (Decision 3) — not a live defect against
+  today's specified pipeline, but leaves `Reconciliation.confirmed.matched`'s `kind` field able to lie
+  about the mechanism, for a future consumer that reads it as ground truth rather than re-deriving from
+  the raw observed deltas the way M5 is specified to.
 - Silently dropping a "vanished" prediction, or inventing a fourth `Reconciliation` status for it
   (Decision 4) — the first repeats plan §E.3's named risk; the second is a `lib/contracts` change out of
   this milestone's authority.
