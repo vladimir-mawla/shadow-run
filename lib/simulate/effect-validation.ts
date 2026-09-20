@@ -115,7 +115,34 @@ export function validateEffectShape(candidate: unknown): readonly EffectShapePro
   return problems;
 }
 
-/** Narrows `candidate` to `ProjectedEffect` given an empty `problems` array from `validateEffectShape` — a small, honest cast boundary (this file already checked every field by hand; TypeScript has no way to know that) used exactly once, in `simulate.ts`, right after the check that makes it safe. */
+/**
+ * Narrows `candidate` to `ProjectedEffect` — a BARE CAST, not a check. It
+ * performs zero validation of its own; it is only safe to call the
+ * instant after `validateEffectShape(candidate)` has returned an empty
+ * `problems` array for that SAME `candidate`, which is the only reason
+ * `simulate.ts` is allowed to call it at all.
+ *
+ * NOT EXPORTED FROM `index.ts`, ON PURPOSE — this was a real defect,
+ * found by independent verification, not a precaution added in advance.
+ * This function was originally exported from the public barrel with a
+ * comment claiming it was "used exactly once, in simulate.ts" — true of
+ * every call site THIS FILE'S AUTHOR wrote, false of the type once it was
+ * public: any external importer could call
+ * `asProjectedEffect({ deltas: "not even an array" })` and get back a
+ * value the type system calls `ProjectedEffect`, with none of
+ * `validateEffectShape`'s or `checkConsistency`'s checks having run —
+ * skipping every one of `simulate()`'s four fail-closed gates
+ * (`result.ts`) from outside this module entirely, without ever calling
+ * `simulate()`. A doc comment describing a discipline is not the same
+ * thing as a type system enforcing it; only removing the export does
+ * that (see `index.ts`'s own header for the fix and the confirmed
+ * before/after). If a future milestone genuinely needs this exported,
+ * it must keep it exactly as unsafe as it is (this file does not attempt
+ * to make the cast itself safer — the shape check IS the safety, and it
+ * lives in `validateEffectShape`, not here) and repeat this same warning
+ * at the new call site, the same discipline `path.ts` already holds its
+ * own internal-only primitives to.
+ */
 export function asProjectedEffect(candidate: unknown): ProjectedEffect {
   return candidate as ProjectedEffect;
 }
