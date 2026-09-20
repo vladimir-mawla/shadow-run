@@ -27,14 +27,40 @@ describe("checkConsistency — the self-consistency check in isolation", () => {
     expect(result.problems.some((p) => p.includes("started at 999") && p.includes("actually has 39"))).toBe(true);
   });
 
-  it("LAYER 1: catches an 'append' that claims a fresh leaf where one already exists", () => {
+  it("LAYER 1: catches an 'append' that claims a fresh leaf where one already exists — post-reopening, this is the SAME generic before-mismatch message every other kind gets, not a bespoke 'append' message, since kind is no longer branched on here (see consistency.ts's 'REOPENED' header note)", () => {
     const dishonestAppend = {
       ...validEffectFor39(),
       deltas: [{ path: "reserved", before: undefined, after: 1, kind: "append" as const }],
     };
     const result = checkConsistency({ reserved: 39 }, dishonestAppend);
     expect(result.ok).toBe(false);
-    expect(result.problems.some((p) => p.includes('claims "append"') && p.includes("already exists"))).toBe(true);
+    expect(result.problems.some((p) => p.includes('started at undefined') && p.includes("actually has 39"))).toBe(true);
+  });
+
+  it("REOPENED (M6 integration finding, adopted from independent verification): a whole-snapshot 'append' delta against a path that ALREADY holds the prior collection value is now consistent — ADR 0004 Decision 1 (M5) establishes before/after as whole-value snapshots for every kind, including append, so a real append to an existing array never starts from `undefined`; this file's old append-must-start-undefined rule was the outlier, not ADR 0004", () => {
+    const data = { items: ["a", "b"] };
+    const effect = {
+      deltas: [{ path: "items", before: ["a", "b"], after: ["a", "b", "c"], kind: "append" as const }],
+      resultingFingerprint: computeFingerprint({ items: ["a", "b", "c"] }),
+      assumptions: [],
+      producedBy: "shadow-execution" as const,
+    };
+    const result = checkConsistency(data, effect);
+    expect(result.ok).toBe(true);
+    expect(result.problems).toEqual([]);
+  });
+
+  it("REOPENED sanity: a whole-snapshot 'append' delta that LIES about the prior collection value is still caught — the reopening widens WHAT STARTING STATE is accepted, it does not stop checking that the claimed starting state is honest", () => {
+    const data = { items: ["a", "b"] };
+    const dishonestGrow = {
+      deltas: [{ path: "items", before: ["x", "y", "z"], after: ["x", "y", "z", "c"], kind: "append" as const }],
+      resultingFingerprint: computeFingerprint({ items: ["x", "y", "z", "c"] }),
+      assumptions: [],
+      producedBy: "shadow-execution" as const,
+    };
+    const result = checkConsistency(data, dishonestGrow);
+    expect(result.ok).toBe(false);
+    expect(result.problems.some((p) => p.includes('started at ["x","y","z"]') && p.includes('actually has ["a","b"]'))).toBe(true);
   });
 
   it("LAYER 2: catches a resultingFingerprint that doesn't match what the deltas actually produce", () => {

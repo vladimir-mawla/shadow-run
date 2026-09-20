@@ -27,19 +27,46 @@ import { deleteAtPath, getAtPath, PathResolutionError, setAtPath } from "./path.
  *     ALREADY exist (`delta.ts`'s own semantics — these all describe a
  *     change to something already there). The value found there must
  *     deep-equal `delta.before`.
- *   - For `"append"`: the path is expected to NOT exist yet (`delta.ts`:
- *     "add a value to a collection at path" — modeled here, per this
- *     file's own reading of `invertDelta`'s mapping in `sim-plan.md` §A.4,
- *     as the path itself naming the new leaf that is being created, not
- *     an index into a pre-existing array — see `path.ts`'s file header
- *     for the full reasoning). If the path already has a value, that's a
- *     contradiction: something is already there, so this isn't actually
- *     an append. THIS ASSUMPTION IS SHARED WITH `path.ts`, NOT UNIQUE TO
- *     THIS FILE — see that file's own header for the matching
- *     cross-reference: a future reopening of "no array-index syntax,
- *     append creates a new leaf" must update `checkClaimedBefore` here
- *     AND `path.ts`'s primitives together, or the two will silently
- *     enforce different rules.
+ *   - For `"append"`: the SAME deep-equal-`delta.before` rule applies,
+ *     with no special case — see "REOPENED" below for why this file used
+ *     to require the path to start `undefined` here, and why that turned
+ *     out to be wrong. `current` MAY legitimately be `undefined` for an
+ *     `append` (a genuinely fresh leaf, matching `delta.before: undefined`)
+ *     or may legitimately be a real, already-populated value (growing an
+ *     existing collection, matching `delta.before` against that whole
+ *     collection) — both are honest `append`s under ADR 0004's model, and
+ *     both are checked the identical way every other `kind` already is:
+ *     does the real current value deep-equal what the delta claims it
+ *     was.
+ *
+ * REOPENED (post-M6 integration finding, verified before being adopted —
+ * see the PR that carries this comment for the confirmation): this file
+ * ORIGINALLY required an `append` delta's path to be currently
+ * `undefined`, unconditionally, reading `delta.ts`'s prose ("add a value
+ * to a collection at path") as "the path itself is the new leaf being
+ * created." `.genesis/decisions/0004-rollback.md` (M5, written and
+ * accepted AFTER this file) Decision 1 settled the question the other
+ * way, canonically, for the whole codebase: `Delta.before`/`after` are
+ * WHOLE-VALUE SNAPSHOTS at `path` for all four `kind`s, so a real
+ * `append` to an already-populated array has a non-`undefined` `before`
+ * — the exact opposite of what this file required. `apply-deltas.ts` and
+ * `invert-delta.ts` (`lib/rollback/**`) were already built on that
+ * convention; this file's old `append`-must-start-`undefined` rule
+ * predated it and was the one file in the codebase still enforcing the
+ * rejected reading. M6's `domains/shared/grow.ts` had to work around this
+ * file's old behavior with a two-step `remove`-then-`append` pair for
+ * every array-growing domain, purely to satisfy a rule this file no
+ * longer applies — see that file's own header, which is not rewritten
+ * here (`domains/**` is a separate freeze boundary) but is now stale in
+ * the specific sense that the workaround it describes is no longer
+ * required by THIS file (whether to remove it is the orchestrator's
+ * call, not this one). THE FIX ITSELF IS NARROW: `checkClaimedBefore`
+ * below no longer branches on `delta.kind` at all before comparing
+ * `current` to `delta.before` — `kind` was already inert to how a delta
+ * is APPLIED (`applyOneDelta` below never inspected it either); this
+ * removes the one place it was still inspected for VALIDATION, bringing
+ * this file in line with every other consumer of `Delta` in this
+ * codebase.
  *
  * LAYER 2 — FINAL FINGERPRINT CONSISTENCY. After applying every delta (in
  * order — order matters when two deltas touch related paths, e.g. a
@@ -109,19 +136,31 @@ export function checkConsistency(data: Json, effect: ProjectedEffect): Consisten
   return { ok: problems.length === 0, problems };
 }
 
-/** Layer 1 for one delta — see file header. Returns a problem string, or `undefined` if `delta.before` is honest. `deepEqualJson` is used rather than `===` because `before`/`after` are `unknown` (delta.ts) and a domain's real state is routinely object/array-shaped, not just primitives. */
+/**
+ * Layer 1 for one delta — see file header. Returns a problem string, or
+ * `undefined` if `delta.before` is honest. `deepEqualJson` is used rather
+ * than `===` because `before`/`after` are `unknown` (delta.ts) and a
+ * domain's real state is routinely object/array-shaped, not just
+ * primitives.
+ *
+ * NO BRANCH ON `delta.kind` HERE (see file header's "REOPENED" note for
+ * why an `append`-specific branch used to exist and why it was removed):
+ * `"set" | "increment" | "remove"` require the path to already hold a
+ * value (`current !== undefined`) before comparing it — that assumption
+ * is real, still enforced, and NOT part of this reopening. `"append"` is
+ * the one `kind` that may legitimately start from a truly absent path
+ * (`current === undefined`, matching `delta.before: undefined` — a fresh
+ * leaf) as well as an already-populated one (growing an existing
+ * collection) — so it skips straight to the `deepEqualJson` comparison,
+ * which already handles BOTH `current === undefined` (via `a === b` in
+ * `deepEqualJson`, since `undefined === undefined`) and a real populated
+ * value, with no separate case needed.
+ */
 function checkClaimedBefore(delta: Delta, current: Json | undefined, index: number): ConsistencyProblem | undefined {
-  if (delta.kind === "append") {
-    if (current !== undefined) {
-      return `deltas[${index}] claims "append" at path "${delta.path}", but a value already exists there: ${JSON.stringify(current)}`;
-    }
-    return undefined;
-  }
-
-  if (current === undefined) {
+  if (delta.kind !== "append" && current === undefined) {
     return `deltas[${index}] (kind "${delta.kind}") claims path "${delta.path}" already had a value, but nothing exists there in the input World.data`;
   }
-  if (!deepEqualJson(current, delta.before as Json)) {
+  if (!deepEqualJson(current as Json, delta.before as Json)) {
     return (
       `deltas[${index}] claims path "${delta.path}" started at ${JSON.stringify(delta.before)}, ` +
       `but the input World.data actually has ${JSON.stringify(current)} there`
