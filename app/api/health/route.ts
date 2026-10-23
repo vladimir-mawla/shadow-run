@@ -13,8 +13,9 @@ import {
  * during the build that produced the static output.
  *
  * The `runtime = "nodejs"` line below is no longer load-bearing the way
- * this comment used to claim. Checked directly against this repo's pinned
- * Next.js version (16.3.5, see package.json): as of Next.js 16.3, `"edge"`
+ * this comment used to claim. Checked directly against Next.js 16.3.5 (the
+ * version this repo was pinned to when this was written; package.json holds
+ * the current pin): as of Next.js 16.3, `"edge"`
  * is a deprecated route-segment config that only emits a warning, and
  * Node.js is unconditionally the default for route handlers — there is no
  * longer another runtime a route could silently default into. (Next's own
